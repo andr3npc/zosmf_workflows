@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="../workflow/schemas/workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>pds-management</workflowID>
+        <workflowDescription>Create and Manage PDS Datasets</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+        <General/>
+    </workflowInfo>
+
+    <variable name="pdsName" scope="instance" visibility="public">
+        <label>PDS Dataset Name</label>
+        <abstract>Fully qualified dataset name for the PDS</abstract>
+        <description>Enter the fully qualified dataset name to allocate</description>
+        <category>PDS</category>
+        <string valueMustBeChoice="false" multiLine="false">
+            <default>ANDRE.TEST.JCL3</default>
+        </string>
+    </variable>
+
+    <step name="createPDS" optional="false">
+        <title>Create PDS Dataset</title>
+        <description>Allocate the PDS dataset by submitting a batch job</description>
+        <instructions substitution="true">
+            <p>This step submits a job to allocate PDS: ${instance-pdsName}</p>
+        </instructions>
+        <weight>5</weight>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>true</canMarkAsFailed>
+        <template>
+            <inlineTemplate substitution="true">
+//ANDREB    JOB AMS-CLEAN,
+//             ANDRE,
+//             NOTIFY=ANDRE,CLASS=A,
+//             MSGLEVEL=(1,1)
+//*
+//ALLOC    EXEC PGM=IEFBR14
+//NEWPDS   DD  DSN=${instance-pdsName},
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(TRK,(10,5,20)),
+//             DCB=(RECFM=FB,LRECL=80,BLKSIZE=27920),
+//             DSORG=PO
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+        </template>
+    </step>
+
+</workflow>

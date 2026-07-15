@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>dormant-id-cleanup</workflowID>
+        <workflowDefaultName>Dormant ID Cleanup</workflowDefaultName>
+        <workflowDescription>Finds dormant IDs in a RACF group, reports them, and revokes after manual approval.</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>ANDRE</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="RACF_GROUP" scope="instance" visibility="public">
+        <label>RACF Group</label>
+        <abstract>The RACF group whose members will be scanned for dormant IDs</abstract>
+        <description>All user IDs connected to this group will be checked. Only active (non-revoked) IDs are evaluated. Example: IZUADMIN</description>
+        <category>RACF</category>
+        <string>
+            <default>IZUADMIN</default>
+        </string>
+    </variable>
+
+    <variable name="DORMANT_DAYS" scope="instance" visibility="public">
+        <label>Dormant Threshold (days)</label>
+        <abstract>Number of days of inactivity after which a user ID is considered dormant</abstract>
+        <description>Any user ID whose RACF LASTUSED date is older than this many days - or who has never logged on - will be flagged as dormant. Typical values: 90, 180, 365.</description>
+        <category>RACF</category>
+        <integer>
+            <default>90</default>
+        </integer>
+    </variable>
+
+    <variable name="REXX_DATASET" scope="instance" visibility="public">
+        <label>REXX Library Dataset</label>
+        <abstract>Dataset containing the DORMANT REXX exec</abstract>
+        <description>The PDS or PDSE where the DORMANT REXX exec member resides. Example: ANDRE.REXX.EXEC</description>
+        <category>RACF</category>
+        <string>
+            <default>ANDRE.REXX.EXEC</default>
+        </string>
+    </variable>
+
+    <variable name="AUDIT_DATASET" scope="instance" visibility="public">
+        <label>Audit Dataset</label>
+        <abstract>Sequential dataset to which the revocation run is appended</abstract>
+        <description>An existing physical-sequential dataset that the optional audit step appends one record to, noting who ran the revocation, when, for which group, and at what threshold. Must already be allocated. Example: ANDRE.DORMANT.AUDIT</description>
+        <category>RACF</category>
+        <string>
+            <default>ANDRE.DORMANT.AUDIT</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 - Confirm group exists
+         ============================================================ -->
+
+    <step name="confirmGroup">
+        <title>Confirm RACF Group Exists</title>
+        <description>Runs LISTGRP to verify the target group exists and records its current member list before the dormancy scan begins.</description>
+        <variableValue name="RACF_GROUP" required="true"/>
+        <instructions substitution="true">
+            Runs LISTGRP ${instance-RACF_GROUP} to confirm the group is valid and to
+            capture a baseline member list. Review the output before proceeding.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//LISTGRP  EXEC PGM=IKJEFT01,DYNAMNBR=36
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ LISTGRP ${instance-RACF_GROUP}
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 - Generate dormant ID report (read-only)
+         ============================================================ -->
+
+    <step name="dormantReport">
+        <title>Generate Dormant ID Report</title>
+        <description>Runs the DORMANT REXX exec in report-only mode. No changes are made to RACF. Produces a list of all IDs in the group flagged as dormant or never-used.</description>
+        <prereqStep name="confirmGroup"/>
+        <variableValue name="RACF_GROUP"   required="true"/>
+        <variableValue name="DORMANT_DAYS" required="true"/>
+        <variableValue name="REXX_DATASET" required="true"/>
+        <instructions substitution="true">
+            This step scans all members of group ${instance-RACF_GROUP} using LISTUSER
+            to read each user's LAST-ACCESS date from their RACF profile.
+
+            An ID is flagged DORMANT if its last logon was more than
+            ${instance-DORMANT_DAYS} days ago, or NEVER-USED if no logon has
+            ever been recorded.
+
+            Already-revoked IDs are reported as ALREADY-REVOKED and skipped.
+
+            This step is read-only - no RACF changes are made here.
+            Review the report carefully before proceeding to the approval step.
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ EX '${instance-REXX_DATASET}(DORMANT)' '${instance-RACF_GROUP} ${instance-DORMANT_DAYS}'
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 - Manual approval gate
+         ============================================================ -->
+
+    <step name="approvalGate">
+        <title>Review and Approve Revocation</title>
+        <description>Manual checkpoint. A security administrator must review the dormant ID report from the previous step and explicitly complete this step to authorise revocation. Skipping or leaving this step incomplete will prevent the revoke step from running.</description>
+        <prereqStep name="dormantReport"/>
+        <instructions substitution="true">
+            APPROVAL REQUIRED BEFORE REVOCATION
+
+            Review the dormant ID report produced in the previous step.
+
+            Before completing this step confirm that:
+              1. You have reviewed every ID listed as DORMANT or NEVER-USED.
+              2. You have verified with application owners / the access management
+                 team that none of the flagged IDs are in active use by batch
+                 jobs, service accounts, or shared credentials.
+              3. You have obtained the required authorisation (change record,
+                 manager approval, etc.) per your site security policy.
+              4. You understand that the next step will issue ALTUSER ... REVOKE
+                 for every flagged ID in group ${instance-RACF_GROUP}.
+
+            Mark this step Complete only when all of the above are satisfied.
+            If any IDs should be excluded, stop the workflow and adjust the
+            group membership or dormancy threshold before restarting.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="false">
+/* Approval gate. This step is intentionally a submittable REXX  */
+/* so completing it leaves a durable audit record of who         */
+/* authorised the revocation and when. A template is optional    */
+/* here - an instruction-only manual step would gate the same    */
+/* way via prereqStep - but the audit record is the reason we    */
+/* keep it. The exec makes no RACF changes and exits 0.          */
+SAY 'Approval gate acknowledged by' SYSVAR('SYSUID')
+SAY 'Timestamp:' DATE() TIME()
+EXIT 0
+            </inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>Approval gate acknowledged</successPattern>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 - Revoke dormant IDs
+         ============================================================ -->
+
+    <step name="revokeDormantIDs">
+        <title>Revoke Dormant IDs</title>
+        <description>Runs the DORMANT REXX exec in REVOKE mode. Every ID flagged as DORMANT or NEVER-USED in the group will receive ALTUSER ... REVOKE. Requires the approval gate step to be complete.</description>
+        <prereqStep name="approvalGate"/>
+        <variableValue name="RACF_GROUP"   required="true"/>
+        <variableValue name="DORMANT_DAYS" required="true"/>
+        <variableValue name="REXX_DATASET" required="true"/>
+        <instructions substitution="true">
+            This step issues ALTUSER ... REVOKE for every active user ID in group
+            ${instance-RACF_GROUP} whose last logon is older than
+            ${instance-DORMANT_DAYS} days, or who has never logged on.
+
+            WARNING: This action modifies RACF. Revoked IDs cannot log on until
+            explicitly restored with ALTUSER ... RESUME.
+
+            The step will exit RC=8 if any individual revocation fails;
+            review SYSTSPRT to identify which IDs could not be revoked.
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ EX '${instance-REXX_DATASET}(DORMANT)' '${instance-RACF_GROUP} ${instance-DORMANT_DAYS} REVOKE'
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 5 - Capture audit record (optional)
+         ============================================================ -->
+
+    <step name="captureAudit">
+        <title>Capture Audit Record</title>
+        <description>Optional. Appends a single timestamped record of this revocation run to an existing sequential audit dataset, giving a durable trail of who ran the cleanup, when, for which group, and at what threshold. The revoked ID list itself remains in the previous step's output.</description>
+        <prereqStep name="revokeDormantIDs"/>
+        <variableValue name="RACF_GROUP"    required="true"/>
+        <variableValue name="DORMANT_DAYS"  required="true"/>
+        <variableValue name="AUDIT_DATASET" required="true"/>
+        <instructions substitution="true">
+            Appends one record to ${instance-AUDIT_DATASET} recording that a
+            revocation run was performed against group ${instance-RACF_GROUP}
+            with a ${instance-DORMANT_DAYS}-day threshold.
+
+            The audit dataset must already exist as a physical-sequential
+            dataset. This step makes no RACF changes.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+/* Append an audit record of this revocation run. */
+auditDS = "${instance-AUDIT_DATASET}"
+grp     = "${instance-RACF_GROUP}"
+days    = "${instance-DORMANT_DAYS}"
+rec = DATE('S') TIME() SYSVAR('SYSUID'),
+      'REVOKE run group='grp 'threshold='days'd'
+"ALLOC F(AUD) DA('"auditDS"') MOD REUSE"
+if rc = 0 then do
+  queue rec
+  "EXECIO 1 DISKW AUD (FINIS"
+  "FREE F(AUD)"
+  say 'Audit record written to' auditDS
+end
+else say 'Could not allocate' auditDS 'rc='rc
+EXIT 0
+            </inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>Audit record written</successPattern>
+        </template>
+    </step>
+
+</workflow>

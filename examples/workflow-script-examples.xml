@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  z/OSMF Workflow: Script Step Examples with Variable Passing
+  This workflow demonstrates:
+  - REXX exec steps  (via <template> + <submitAs>TSO-REXX</submitAs>)
+  - Shell script steps (via <template> + <submitAs>shell-JCL</submitAs>)
+  - Variable passing between steps
+  - Inline templates (file-based form shown in comments)
+
+  NOTE: z/OSMF has NO <rexx>, <shell>, <unixShell>, <inline> or <file>
+  elements. A step's action must be exactly one of {template, rest,
+  setVariable}. Scripts run through <template>. Steps are kept flat
+  (leaf steps): a step that has weight/skills/autoEnable/canMarkAsFailed
+  must be followed by an action, not by a substep.
+-->
+<workflow>
+    <workflowInfo>
+        <workflowID scope="none">script-examples</workflowID>
+        <workflowDescription>Learn REXX and Shell Script Steps with Variable Passing</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Learning Example</vendor>
+        <Configuration>
+            <productID>z/OS</productID>
+            <productName>z/OS</productName>
+            <productVersion>V2R4</productVersion>
+        </Configuration>
+    </workflowInfo>
+
+    <!-- Variable Definitions -->
+    <variable name="USER_NAME" scope="instance">
+        <label>User Name</label>
+        <abstract>Your name for personalized messages</abstract>
+        <description>Enter your name to see it used in the scripts</description>
+        <category>General</category>
+        <string>
+            <minLength>1</minLength>
+            <maxLength>50</maxLength>
+            <default>Student</default>
+        </string>
+    </variable>
+
+    <variable name="DATASET_HLQ" scope="instance">
+        <label>Dataset High Level Qualifier</label>
+        <abstract>HLQ for dataset operations</abstract>
+        <description>High level qualifier for any datasets referenced</description>
+        <category>General</category>
+        <string>
+            <minLength>1</minLength>
+            <maxLength>8</maxLength>
+            <default>USER</default>
+        </string>
+    </variable>
+
+    <variable name="COUNTER" scope="instance">
+        <label>Counter Value</label>
+        <abstract>A numeric counter for demonstrations</abstract>
+        <description>Initial counter value (will be incremented by scripts)</description>
+        <category>General</category>
+        <integer>
+            <default>1</default>
+        </integer>
+    </variable>
+
+    <variable name="REXX_OUTPUT" scope="instance">
+        <label>REXX Output</label>
+        <abstract>Output from REXX step</abstract>
+        <description>This variable will be set by the REXX script</description>
+        <category>Output</category>
+        <string>
+            <default>Not set</default>
+        </string>
+    </variable>
+
+    <variable name="SHELL_OUTPUT" scope="instance">
+        <label>Shell Output</label>
+        <abstract>Output from shell script step</abstract>
+        <description>This variable will be set by the shell script</description>
+        <category>Output</category>
+        <string>
+            <default>Not set</default>
+        </string>
+    </variable>
+
+    <!-- Step 1: Inline REXX Exec -->
+    <step name="step1-inline-rexx" optional="false">
+        <title>Step 1: Inline REXX Exec with Variable Access</title>
+        <description>
+            This step demonstrates an inline REXX exec that:
+            - Reads workflow variables
+            - Performs calculations
+            - Uses REXX built-in functions
+        </description>
+
+        <instructions substitution="true">
+            This step will execute an inline REXX script that accesses the variables:
+            - USER_NAME: ${instance-USER_NAME}
+            - DATASET_HLQ: ${instance-DATASET_HLQ}
+            - COUNTER: ${instance-COUNTER}
+
+            The REXX script will increment the counter and create a personalized message.
+        </instructions>
+
+        <weight>1</weight>
+        <skills>z/OS REXX Programming</skills>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[/* REXX */
+/* Inline REXX Example - Variable Access and Manipulation */
+SAY '================================================'
+SAY 'REXX EXEC - Inline Execution'
+SAY '================================================'
+SAY ''
+
+/* Access workflow variables using substitution */
+user_name = '${instance-USER_NAME}'
+dataset_hlq = '${instance-DATASET_HLQ}'
+counter = '${instance-COUNTER}'
+
+SAY 'Input Variables:'
+SAY '  USER_NAME    = ' || user_name
+SAY '  DATASET_HLQ  = ' || dataset_hlq
+SAY '  COUNTER      = ' || counter
+SAY ''
+
+/* Perform some operations */
+new_counter = counter + 10
+timestamp = DATE('S') || ' ' || TIME()
+message = 'Hello ' || user_name || '! Counter incremented to ' || new_counter
+
+SAY 'Processing:'
+SAY '  New Counter  = ' || new_counter
+SAY '  Timestamp    = ' || timestamp
+SAY '  Message      = ' || message
+SAY ''
+
+/* Demonstrate REXX built-in functions */
+SAY 'REXX Built-in Functions Demo:'
+SAY '  USERID()     = ' || USERID()
+SAY '  MVSVAR(SYSNAME) = ' || MVSVAR('SYSNAME')
+SAY '  LENGTH(message) = ' || LENGTH(message)
+SAY '  WORDS(message)  = ' || WORDS(message)
+SAY ''
+
+/* Create output for workflow variable */
+output_msg = 'REXX completed at ' || timestamp || ' - Counter=' || new_counter
+
+SAY 'Output Variable:'
+SAY '  REXX_OUTPUT  = ' || output_msg
+SAY ''
+SAY 'REXX execution completed successfully!'
+SAY '================================================'
+SAY 'WORKFLOW_STEP_SUCCESS'
+
+EXIT 0
+]]></inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>WORKFLOW_STEP_SUCCESS</successPattern>
+        </template>
+    </step>
+
+    <!-- Step 2: REXX from Dataset (placeholder; switch to fileTemplate to use a member) -->
+    <step name="step2-rexx-dataset" optional="true">
+        <title>Step 2: REXX Exec from Dataset (Optional)</title>
+        <description>
+            This step shows how to execute a REXX exec stored in a dataset.
+            This is optional because it requires a pre-existing dataset member.
+        </description>
+
+        <instructions substitution="true">
+            To use a real member, create a REXX exec such as ${instance-DATASET_HLQ}.REXX(SAMPLE)
+            and replace the inlineTemplate below with:
+                fileTemplate -> ${instance-DATASET_HLQ}.REXX(SAMPLE)
+            (Disabled by default - enable if you have the dataset.)
+        </instructions>
+
+        <weight>1</weight>
+        <skills>z/OS Dataset Management</skills>
+        <autoEnable>false</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <!-- For file-based REXX, replace <inlineTemplate> with:
+                 <fileTemplate substitution="true">${instance-DATASET_HLQ}.REXX(SAMPLE)</fileTemplate>
+            -->
+            <inlineTemplate substitution="true"><![CDATA[/* REXX */
+SAY 'This is a placeholder for file-based REXX execution'
+SAY 'To use a dataset member, swap inlineTemplate for fileTemplate'
+SAY 'WORKFLOW_STEP_SUCCESS'
+EXIT 0
+]]></inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>WORKFLOW_STEP_SUCCESS</successPattern>
+        </template>
+    </step>
+
+    <!-- Step 3: Inline Unix Shell Script -->
+    <step name="step3-inline-shell" optional="false">
+        <title>Step 3: Inline Unix Shell Script with Variables</title>
+        <description>
+            This step demonstrates an inline Unix shell script that accesses
+            workflow variables, uses shell commands, and performs file operations.
+        </description>
+
+        <instructions substitution="true">
+            This step executes a Unix shell script with these variables:
+            - USER_NAME: ${instance-USER_NAME}
+            - DATASET_HLQ: ${instance-DATASET_HLQ}
+            - COUNTER: ${instance-COUNTER}
+        </instructions>
+
+        <weight>1</weight>
+        <skills>Unix Shell Scripting</skills>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[#!/bin/sh
+# Inline Shell Script Example - Variable Access and Unix Commands
+
+echo "================================================"
+echo "UNIX SHELL SCRIPT - Inline Execution"
+echo "================================================"
+echo ""
+
+# Access workflow variables using substitution
+USER_NAME="${instance-USER_NAME}"
+DATASET_HLQ="${instance-DATASET_HLQ}"
+COUNTER=${instance-COUNTER}
+
+echo "Input Variables:"
+echo "  USER_NAME    = $USER_NAME"
+echo "  DATASET_HLQ  = $DATASET_HLQ"
+echo "  COUNTER      = $COUNTER"
+echo ""
+
+# Perform some operations
+NEW_COUNTER=$((COUNTER + 20))
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+MESSAGE="Hello $USER_NAME from shell! Counter is now $NEW_COUNTER"
+
+echo "Processing:"
+echo "  New Counter  = $NEW_COUNTER"
+echo "  Timestamp    = $TIMESTAMP"
+echo "  Message      = $MESSAGE"
+echo ""
+
+# Demonstrate Unix commands
+echo "Unix Environment Information:"
+echo "  Hostname     = $(hostname)"
+echo "  Current User = $(whoami)"
+echo "  Current Dir  = $(pwd)"
+echo "  Home Dir     = $HOME"
+echo ""
+
+# File operations example
+TEMP_FILE="/tmp/workflow_test_$$"
+echo "Creating temporary file: $TEMP_FILE"
+echo "Workflow test data" > "$TEMP_FILE"
+echo "Counter: $NEW_COUNTER" >> "$TEMP_FILE"
+echo "User: $USER_NAME" >> "$TEMP_FILE"
+
+if [ -f "$TEMP_FILE" ]; then
+    echo "File created successfully. Contents:"
+    cat "$TEMP_FILE"
+    echo ""
+    rm "$TEMP_FILE"
+    echo "Temporary file removed."
+else
+    echo "Warning: File creation failed"
+fi
+echo ""
+
+echo "Shell script execution completed successfully!"
+echo "================================================"
+
+exit 0
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+        </template>
+    </step>
+
+    <!-- Step 4: Shell Script from USS File (placeholder; switch to fileTemplate to use a file) -->
+    <step name="step4-shell-file" optional="true">
+        <title>Step 4: Shell Script from USS File (Optional)</title>
+        <description>
+            This step shows how to execute a shell script stored in a USS file.
+            This is optional because it requires a pre-existing USS file.
+        </description>
+
+        <instructions substitution="true">
+            To use a real file, create /u/${instance-DATASET_HLQ}/scripts/sample.sh (chmod +x)
+            and replace the inlineTemplate below with:
+                fileTemplate -> /u/${instance-DATASET_HLQ}/scripts/sample.sh
+            (Disabled by default - enable if you have the file.)
+        </instructions>
+
+        <weight>1</weight>
+        <skills>USS File Management</skills>
+        <autoEnable>false</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <!-- For a file-based shell script, replace <inlineTemplate> with:
+                 <fileTemplate substitution="true">/u/${instance-DATASET_HLQ}/scripts/sample.sh</fileTemplate>
+            -->
+            <inlineTemplate substitution="true"><![CDATA[#!/bin/sh
+echo "This is a placeholder for file-based shell script execution"
+echo "To use a USS file, swap inlineTemplate for fileTemplate"
+exit 0
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+        </template>
+    </step>
+
+    <!-- Step 5: REXX Advanced Variable Handling -->
+    <step name="step5a-rexx-advanced" optional="false">
+        <title>Step 5: REXX Advanced Variable Handling</title>
+        <description>
+            Advanced REXX techniques: string manipulation, numeric operations,
+            conditional logic, and stem (array) variables.
+        </description>
+
+        <instructions substitution="true">
+            REXX script demonstrating advanced variable manipulation with:
+            - USER_NAME: ${instance-USER_NAME}
+            - COUNTER: ${instance-COUNTER}
+        </instructions>
+
+        <weight>1</weight>
+        <skills>Advanced Scripting</skills>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[/* REXX */
+SAY '================================================'
+SAY 'REXX ADVANCED VARIABLE TECHNIQUES'
+SAY '================================================'
+SAY ''
+
+/* Get variables */
+user_name = '${instance-USER_NAME}'
+counter = '${instance-COUNTER}'
+
+/* String manipulation */
+SAY 'String Manipulation:'
+SAY '  Original name: ' || user_name
+SAY '  Uppercase:     ' || TRANSLATE(user_name)
+SAY '  Lowercase:     ' || TRANSLATE(user_name, ,
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ', ,
+    'abcdefghijklmnopqrstuvwxyz')
+SAY '  Reversed:      ' || REVERSE(user_name)
+SAY '  First char:    ' || SUBSTR(user_name, 1, 1)
+SAY ''
+
+/* Numeric operations */
+SAY 'Numeric Operations:'
+SAY '  Counter:       ' || counter
+SAY '  Counter * 2:   ' || (counter * 2)
+SAY '  Counter ** 2:  ' || (counter ** 2)
+SAY '  Counter / 2:   ' || (counter / 2)
+SAY '  Counter // 3:  ' || (counter // 3)
+SAY ''
+
+/* Conditional logic */
+SAY 'Conditional Logic:'
+IF counter > 10 THEN
+    SAY '  Counter is greater than 10'
+ELSE
+    SAY '  Counter is 10 or less'
+
+IF LENGTH(user_name) > 5 THEN
+    SAY '  Name is longer than 5 characters'
+ELSE
+    SAY '  Name is 5 characters or shorter'
+SAY ''
+
+/* Stem variables (arrays) */
+SAY 'Stem Variables (Arrays):'
+data.0 = 3
+data.1 = 'First item'
+data.2 = 'Second item'
+data.3 = 'Third item'
+
+DO i = 1 TO data.0
+    SAY '  data.' || i || ' = ' || data.i
+END
+SAY ''
+
+SAY 'Advanced REXX techniques demonstrated!'
+SAY '================================================'
+SAY 'WORKFLOW_STEP_SUCCESS'
+
+EXIT 0
+]]></inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>WORKFLOW_STEP_SUCCESS</successPattern>
+        </template>
+    </step>
+
+    <!-- Step 5b: Shell Advanced Variable Handling -->
+    <step name="step5b-shell-advanced" optional="false">
+        <title>Step 5 (cont.): Shell Advanced Variable Handling</title>
+        <description>
+            Advanced shell techniques: string manipulation, arithmetic,
+            conditional logic, and parameter expansion (POSIX /bin/sh).
+        </description>
+
+        <instructions>
+            Shell script demonstrating advanced variable manipulation.
+        </instructions>
+
+        <weight>1</weight>
+        <skills>Advanced Scripting</skills>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[#!/bin/sh
+echo "================================================"
+echo "SHELL ADVANCED VARIABLE TECHNIQUES"
+echo "================================================"
+echo ""
+
+# Get variables
+USER_NAME="${instance-USER_NAME}"
+COUNTER=${instance-COUNTER}
+
+# String manipulation
+# NOTE: avoid shell brace parameter-expansion (length, default-value, substring
+# forms) here. With substitution=true the z/OSMF template engine parses EVERY
+# dollar-brace token as a workflow variable - even inside shell comments - and
+# fails on shell-specific syntax (IZUWF0084E). Use plain $VAR for workflow
+# values and brace-free constructs for everything else.
+NAME_LEN=$(printf %s "$USER_NAME" | wc -c | tr -d ' ')
+echo "String Manipulation:"
+echo "  Original name: $USER_NAME"
+echo "  Uppercase:     $(echo $USER_NAME | tr '[:lower:]' '[:upper:]')"
+echo "  Lowercase:     $(echo $USER_NAME | tr '[:upper:]' '[:lower:]')"
+echo "  Length:        $NAME_LEN"
+echo ""
+
+# Numeric operations
+echo "Numeric Operations:"
+echo "  Counter:       $COUNTER"
+echo "  Counter + 5:   $((COUNTER + 5))"
+echo "  Counter * 3:   $((COUNTER * 3))"
+echo "  Counter / 2:   $((COUNTER / 2))"
+echo "  Counter % 3:   $((COUNTER % 3))"
+echo ""
+
+# Conditional logic
+echo "Conditional Logic:"
+if [ $COUNTER -gt 10 ]; then
+    echo "  Counter is greater than 10"
+else
+    echo "  Counter is 10 or less"
+fi
+
+if [ "$NAME_LEN" -gt 5 ]; then
+    echo "  Name is longer than 5 characters"
+else
+    echo "  Name is 5 characters or shorter"
+fi
+echo ""
+
+# Iterating a list (POSIX-portable, no bash arrays)
+echo "List Iteration:"
+i=0
+OLDIFS=$IFS
+IFS='|'
+for item in "First item|Second item|Third item"; do
+    set -- $item
+    for x in "$@"; do
+        echo "  item[$i] = $x"
+        i=$((i + 1))
+    done
+done
+IFS=$OLDIFS
+echo ""
+
+# Default value (brace-free; a shell default-value expansion would break
+# z/OSMF substitution, so test for empty explicitly instead)
+echo "Default Value Handling:"
+VAR="Hello World"
+echo "  Original:      $VAR"
+DEFVAL=$UNDEFINED_VAR
+if [ -z "$DEFVAL" ]; then DEFVAL="default"; fi
+echo "  Default value: $DEFVAL"
+echo ""
+
+echo "Advanced shell techniques demonstrated!"
+echo "================================================"
+
+exit 0
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+        </template>
+    </step>
+
+    <!-- Step 6: Summary -->
+    <step name="step6-summary" optional="false">
+        <title>Step 6: Summary and Next Steps</title>
+        <description>
+            Review what was learned and suggestions for further exploration.
+        </description>
+
+        <instructions substitution="true">
+            Congratulations, ${instance-USER_NAME}! You've completed the workflow.
+
+            You've learned:
+            1. How to create inline REXX exec steps
+            2. How to create inline Unix shell script steps
+            3. How to pass variables using substitution
+            4. How to reference file-based scripts (fileTemplate)
+            5. Advanced variable manipulation techniques
+
+            Key Concepts:
+            - A step action is one of: template, rest, setVariable. There is
+              NO rexx, shell, unixShell or inline element in the z/OSMF schema
+            - A step with weight/skills/autoEnable/canMarkAsFailed is a leaf and
+              must be followed by an action; it cannot also contain substeps
+            - Use substitution="true" to enable variable substitution
+            - Variables are accessed as the dollar-brace VARIABLE_NAME form
+            - REXX runs via a template element using submitAs TSO-REXX, plus a
+              required successPattern (success is judged from stdout)
+            - Shell runs via a template element using submitAs shell-JCL, with
+              NO successPattern (it runs as a BPXBATCH job, judged by RC)
+            - inlineTemplate holds the script; fileTemplate names a dataset/USS file
+            - CDATA sections prevent XML parsing of script content
+
+            Next Steps:
+            - Try modifying the scripts with your own logic
+            - Create file-based scripts and switch to fileTemplate
+            - Experiment with different variable types
+            - Explore JCL steps for comparison
+        </instructions>
+
+        <weight>1</weight>
+        <skills>Workflow Design</skills>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>false</canMarkAsFailed>
+    </step>
+</workflow>

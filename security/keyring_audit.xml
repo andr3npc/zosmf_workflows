@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>keyring-audit</workflowID>
+        <workflowDefaultName>Keyring Certificate Expiry Audit</workflowDefaultName>
+        <workflowDescription>Audits every certificate in a RACF keyring and flags certificates expiring within N days</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="KEYRING_OWNER" scope="instance" visibility="public">
+        <label>Keyring Owner User ID</label>
+        <abstract>The RACF user ID that owns the keyring</abstract>
+        <description>The RACF user ID associated with the keyring to audit. For the default z/OSMF keyring this is IZUSVR.</description>
+        <category>RACF</category>
+        <string>
+            <validationType>TSOUSERID</validationType>
+            <default>IZUSVR</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_NAME" scope="instance" visibility="public">
+        <label>Keyring Name</label>
+        <abstract>The name of the RACF keyring to audit</abstract>
+        <description>The keyring label associated with KEYRING_OWNER. Example: IZUKeyring.IZUDFLT</description>
+        <category>RACF</category>
+        <string>
+            <default>IZUKeyring.IZUDFLT</default>
+        </string>
+    </variable>
+
+    <variable name="WARN_DAYS" scope="instance" visibility="public">
+        <label>Warning Threshold (days)</label>
+        <abstract>Flag any certificate expiring within this many days</abstract>
+        <description>Any certificate whose expiry date falls within this many days from today will be highlighted with a WARNING flag in the report. Certificates already expired are always flagged EXPIRED. Set to 0 to disable threshold warnings and report expiry dates only.</description>
+        <category>RACF</category>
+        <integer>
+            <default>60</default>
+        </integer>
+    </variable>
+
+    <variable name="REPORT_DATASET" scope="instance" visibility="public">
+        <label>Report Output Dataset</label>
+        <abstract>Optional dataset to capture the report (leave blank for SYSOUT only)</abstract>
+        <description>If specified, the report output is routed to this pre-allocated sequential dataset (DISP=SHR) in addition to SYSOUT. Leave blank to write to SYSOUT only.</description>
+        <category>RACF</category>
+        <string>
+            <validationType>DSNAME</validationType>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Confirm keyring exists and list its contents
+         ============================================================ -->
+
+    <step name="listKeyring">
+        <title>List Keyring Contents</title>
+        <description>Runs RACDCERT LISTRING to confirm the target keyring exists and display all certificates currently connected to it</description>
+        <variableValue name="KEYRING_OWNER" required="true"/>
+        <variableValue name="KEYRING_NAME"  required="true"/>
+        <instructions substitution="true">
+            This step runs RACDCERT ID(${instance-KEYRING_OWNER})
+            LISTRING(${instance-KEYRING_NAME}) via IKJEFT01 to confirm the
+            keyring exists and to record the full list of connected certificates
+            before the expiry audit is performed.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Run the expiry audit REXX
+         ============================================================ -->
+
+    <step name="auditExpiry">
+        <title>Audit Certificate Expiry Dates</title>
+        <description>Runs an inline REXX program that uses RACDCERT LISTRING output to enumerate every certificate in the keyring, extracts its expiry date via IRRXUTIL, and flags any certificate expiring within WARN_DAYS days</description>
+        <prereqStep name="listKeyring"/>
+        <variableValue name="KEYRING_OWNER" required="true"/>
+        <variableValue name="KEYRING_NAME"  required="true"/>
+        <variableValue name="WARN_DAYS"     required="true"/>
+        <instructions substitution="true">
+            This step runs an inline REXX program against keyring
+            ${instance-KEYRING_NAME} owned by ${instance-KEYRING_OWNER}.
+
+            For every certificate connected to the keyring the report shows:
+              - Certificate label
+              - Owning user ID (or CERTAUTH / SITE)
+              - Subject distinguished name (SUBJECT)
+              - Expiry date (YYYY-MM-DD)
+              - Days remaining until expiry
+              - EXPIRED flag if the certificate has already expired
+              - WARNING flag if days remaining is less than ${instance-WARN_DAYS}
+
+            A summary line at the end shows total certificates scanned,
+            warnings raised, and expired certificates found.
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//KREXX    EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ EX 'ANDRE.REXX.EXEC(KEYRGAUD)' '${instance-KEYRING_OWNER} ${instance-KEYRING_NAME} ${instance-WARN_DAYS}' EXEC
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – Archive report to a dataset (optional)
+         ============================================================ -->
+
+    <step name="captureToDataset" optional="true">
+        <title>Copy Report to Dataset (optional)</title>
+        <description>Re-runs the audit REXX and routes SYSTSPRT to the named dataset for archival or downstream processing. Only run this step when REPORT_DATASET has been specified.</description>
+        <prereqStep name="auditExpiry"/>
+        <variableValue name="KEYRING_OWNER"  required="true"/>
+        <variableValue name="KEYRING_NAME"   required="true"/>
+        <variableValue name="WARN_DAYS"      required="true"/>
+        <variableValue name="REPORT_DATASET" required="true"/>
+        <instructions substitution="true">
+            Routes the same audit report to dataset ${instance-REPORT_DATASET}
+            for archival or downstream processing.
+
+            Pre-requisites:
+              - The dataset must already exist and be catalogued.
+              - DISP=SHR is used; ensure no other job has it open exclusively.
+              - Only execute this step when REPORT_DATASET has been filled in.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[
+//KREXX    EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD DSN=]]>${instance-REPORT_DATASET}<![CDATA[,DISP=SHR
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ EX 'ANDRE.REXX.EXEC(KEYRGAUD)' '${instance-KEYRING_OWNER} ${instance-KEYRING_NAME} ${instance-WARN_DAYS}' EXEC
+/*
+]]></inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+</workflow>

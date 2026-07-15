@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow>
+
+    <workflowInfo>
+        <workflowID>purge-spool-jobs</workflowID>
+        <workflowDefaultName>Purge Spool Jobs</workflowDefaultName>
+        <workflowDescription>Purges all jobs from the JES2 spool that match a given owner and are in the Print Queue</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Andre</vendor>
+    </workflowInfo>
+
+    <variable name="JOB_OWNER" scope="instance" visibility="public">
+        <label>Job Owner</label>
+        <abstract>Owner user ID to filter jobs for purging</abstract>
+        <description>Only jobs whose owner matches this user ID will be purged. Defaults to ANDRE.</description>
+        <category>Spool</category>
+        <string>
+            <validationType>USERID</validationType>
+            <default>ANDRE</default>
+        </string>
+    </variable>
+
+    <step name="listJobs">
+        <title>List Matching Jobs</title>
+        <description>Uses SDSF ISFEXEC via TSO REXX to list all jobs owned by the specified user that are in the Print Queue, before any purge is performed.</description>
+        <variableValue name="JOB_OWNER" required="true"/>
+        <instructions substitution="true">
+            This step lists all jobs on the spool owned by ${instance-JOB_OWNER} that
+            are currently in the Print Queue. Review the list before
+            proceeding to the purge step.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[/* REXX - List jobs in Print Queue for a given owner */
+SIGNAL ON NOVALUE NAME HANDLE_ERROR
+
+OWNER = '${instance-JOB_OWNER}'
+
+X = ISFCALLS('ON')
+IF X <> 0 THEN DO
+  SAY 'ISFCALLS ON failed, RC=' X
+  EXIT 12
+END
+
+ISFPREFIX = '*'
+ISFOWNER = OWNER
+
+SAY COPIES('=',72)
+SAY 'SPOOL JOB LIST - Owner:' OWNER '  Queue: Print'
+SAY COPIES('=',72)
+SAY LEFT('JOBNAME',10) LEFT('JOBID',10) LEFT('OWNER',10) LEFT('STATUS',10) 'PRTY'
+SAY COPIES('-',72)
+
+ADDRESS SDSF "ISFEXEC ST"
+IF RC <> 0 THEN DO
+  SAY 'ISFEXEC ST failed, RC=' RC
+  EXIT 12
+END
+
+COUNT = 0
+DO I = 1 TO JNAME.0
+  IF OWNERID.I <> OWNER   THEN ITERATE
+  IF QUEUE.I   <> 'PRINT' THEN ITERATE
+  SAY LEFT(JNAME.I,10) LEFT(JOBID.I,10) LEFT(OWNERID.I,10) LEFT(STATUS.I,10) JPRIO.I
+  COUNT = COUNT + 1
+END
+
+SAY COPIES('-',72)
+SAY 'Jobs matching owner' OWNER 'in Print Queue:' COUNT
+SAY COPIES('=',72)
+X = ISFCALLS('OFF')
+EXIT 0
+
+HANDLE_ERROR:
+  SAY 'REXX NOVALUE error at line' SIGL
+  EXIT 12
+]]></inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>Jobs matching</successPattern>
+        </template>
+    </step>
+
+    <step name="purgeJobs">
+        <title>Purge Matching Jobs</title>
+        <description>Uses SDSF ISFEXEC via TSO REXX to purge all jobs owned by the specified user that are in the Print Queue. Each job is actioned with ISFACT TYPE=PURGE.</description>
+        <prereqStep name="listJobs"/>
+        <variableValue name="JOB_OWNER" required="true"/>
+        <instructions substitution="true">
+            This step purges all jobs on the spool owned by ${instance-JOB_OWNER} that
+            are in the Print Queue.
+
+            WARNING: This action is irreversible. All matching jobs and their spool
+            output will be permanently deleted.
+
+            Review the job list from the previous step before completing this step.
+        </instructions>
+        <weight>5</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[/* REXX - Purge all Print Queue jobs for a given owner via SDSF */
+SIGNAL ON NOVALUE NAME HANDLE_ERROR
+
+OWNER = '${instance-JOB_OWNER}'
+
+X = ISFCALLS('ON')
+IF X <> 0 THEN DO
+  SAY 'ISFCALLS ON failed, RC=' X
+  EXIT 12
+END
+
+ISFPREFIX = '*'
+ISFOWNER = OWNER
+
+SAY COPIES('=',72)
+SAY 'SPOOL PURGE - Owner:' OWNER '  Queue: Print'
+SAY COPIES('=',72)
+
+ADDRESS SDSF "ISFEXEC ST"
+IF RC <> 0 THEN DO
+  SAY 'ISFEXEC ST failed, RC=' RC
+  EXIT 12
+END
+
+PURGED = 0
+FAILED = 0
+DO I = 1 TO JNAME.0
+  IF OWNERID.I <> OWNER   THEN ITERATE
+  IF QUEUE.I   <> 'PRINT' THEN ITERATE
+
+  JOBNAME = JNAME.I
+  JOBID   = JOBID.I
+
+  ADDRESS SDSF "ISFACT ST TOKEN('"TOKEN.I"') PARM(NP P)"
+  IF RC = 0 THEN DO
+    SAY 'PURGED:' LEFT(JOBNAME,10) JOBID
+    PURGED = PURGED + 1
+  END
+  ELSE DO
+    SAY 'FAILED:' LEFT(JOBNAME,10) JOBID '  RC=' RC
+    FAILED = FAILED + 1
+  END
+END
+
+SAY COPIES('-',72)
+SAY 'Purged:' PURGED '  Failed:' FAILED
+SAY COPIES('=',72)
+
+X = ISFCALLS('OFF')
+IF FAILED > 0 THEN EXIT 8
+EXIT 0
+
+HANDLE_ERROR:
+  SAY 'REXX NOVALUE error at line' SIGL
+  EXIT 12
+]]></inlineTemplate>
+            <submitAs>TSO-REXX</submitAs>
+            <successPattern>Purged:</successPattern>
+        </template>
+    </step>
+
+</workflow>

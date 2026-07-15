@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>racdcert-list</workflowID>
+        <workflowDefaultName>RACDCERT List</workflowDefaultName>
+        <workflowDescription>Lists RACF certificates, keyrings and certificate chains for IZUSVR</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <variable name="CERT_USERID" scope="instance" visibility="public">
+        <label>Certificate User ID</label>
+        <abstract>The user ID whose certificates will be listed</abstract>
+        <description>The RACF user ID to list certificates for. Default is IZUSVR.</description>
+        <category>RACF</category>
+        <string>
+            <validationType>TSOUSERID</validationType>
+            <default>IZUSVR</default>
+        </string>
+    </variable>
+
+    <variable name="CA_LABEL" scope="instance" visibility="public">
+        <label>Certificate Authority Label</label>
+        <abstract>Label of the CA certificate in CERTAUTH</abstract>
+        <description>The label of the Certificate Authority certificate. Example: zOSMFCA</description>
+        <category>RACF</category>
+        <string>
+            <default>zOSMFCA</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_LABEL" scope="instance" visibility="public">
+        <label>KeyRing Label</label>
+        <abstract>Name of the RACF keyring to list</abstract>
+        <description>The keyring label associated with the user ID. Example: IZUKeyring.IZUDFLT</description>
+        <category>RACF</category>
+        <string>
+            <default>IZUKeyring.IZUDFLT</default>
+        </string>
+    </variable>
+
+    <variable name="CERT_LABEL" scope="instance" visibility="public">
+        <label>Certificate Label</label>
+        <abstract>Label of the certificate to list chain for</abstract>
+        <description>The label of the certificate to list the chain for. Example: DefaultzOSMFCert.IZUDFLT</description>
+        <category>RACF</category>
+        <string>
+            <default>DefaultzOSMFCert.IZUDFLT</default>
+        </string>
+    </variable>
+
+    <step name="racdcertList">
+        <title>List RACF Certificates and KeyRings</title>
+        <description>Runs RACDCERT LIST, LISTRING and LISTCHAIN commands for the specified user ID via IKJEFT01</description>
+        <variableValue name="CERT_USERID" required="true"/>
+        <variableValue name="CA_LABEL" required="true"/>
+        <variableValue name="KEYRING_LABEL" required="true"/>
+        <variableValue name="CERT_LABEL" required="true"/>
+        <instructions substitution="true">
+            This step submits a TSO batch job to run the following RACDCERT commands for user ID ${instance-CERT_USERID}:
+            - LIST all certificates
+            - LISTRING(*) to list all keyrings
+            - CERTAUTH LIST for CA label: ${instance-CA_LABEL}
+            - LISTRING for keyring: ${instance-KEYRING_LABEL}
+            - LISTCHAIN for certificate: ${instance-CERT_LABEL}
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36
+//FILEOUT  DD SYSOUT=*
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ RACDCERT ID(${instance-CERT_USERID}) LIST
+ RACDCERT ID(${instance-CERT_USERID}) LISTRING(*)
+ RACDCERT CERTAUTH LIST(LABEL('${instance-CA_LABEL}'))
+ RACDCERT ID(${instance-CERT_USERID}) LISTRING(${instance-KEYRING_LABEL})
+ RACDCERT ID(${instance-CERT_USERID}) LISTCHAIN(LABEL('${instance-CERT_LABEL}'))
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+</workflow>

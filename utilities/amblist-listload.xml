@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>amblist-listload</workflowID>
+        <workflowDefaultName>AMBLIST LISTLOAD</workflowDefaultName>
+        <workflowDescription>Runs AMBLIST LISTLOAD of load module AXRINPVT from SYS1.LINKLIB</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+    </workflowInfo>
+
+    <step name="runAmblist">
+        <title>Run AMBLIST LISTLOAD</title>
+        <description>Submits AMBLIST to list load module AXRINPVT from SYS1.LINKLIB (OUTPUT=BOTH). Success is judged by the job return code (CC 0000).</description>
+        <instructions>Submits an AMBLIST LISTLOAD job for AXRINPVT from SYS1.LINKLIB.</instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <canMarkAsFailed>true</canMarkAsFailed>
+        <template>
+            <inlineTemplate substitution="false"><![CDATA[//IZUWFJB  JOB (ACCTINFO),CLASS=A,MSGCLASS=0,
+//             MSGLEVEL=(1,1),REGION=0M,NOTIFY=ANDRE
+/*JOBPARM SYSAFF=ZS31
+//*-----------------------------------------------------------------*
+//*  AMBLIST - LISTLOAD OF LOAD MODULE AXRINPVT FROM SYS1.LINKLIB    *
+//*-----------------------------------------------------------------*
+//LIST     EXEC PGM=AMBLIST,REGION=0K
+//SYSPRINT DD  SYSOUT=*
+//SYSLIB   DD  DISP=SHR,DSN=SYS1.LINKLIB
+//SYSIN    DD  DISP=SHR,DSN=ANDRE.TEST.JCL3(AMBLCTL)]]></inlineTemplate>
+            <submitAs>JCL</submitAs>
+        </template>
+    </step>
+
+</workflow>
