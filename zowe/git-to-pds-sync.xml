@@ -140,70 +140,32 @@ echo "SUCCESS: repo is at latest $BRANCH"
     </step>
 
     <!-- ============================================================
-         Step 2 - Upload all members to PDS via Zowe CLI (primary)
+         Step 2 - Upload all members to PDS via Zowe CLI (workstation)
          ============================================================ -->
 
     <step name="zoweUpload">
-        <title>Upload to PDS via Zowe CLI</title>
-        <description>Uses zowe zos-files upload dir-to-pds to upload every file in the source subdirectory to the target PDS as individual members</description>
+        <title>Upload to PDS via Zowe CLI (run from workstation)</title>
+        <description>Manual step. Runs zowe zos-files upload dir-to-pds from the operator workstation to push all files from the local repo zowe/ directory into the target PDS.</description>
         <prereqStep name="gitPull"/>
-        <variableValue name="GIT_DIR"      required="true"/>
+        <variableValue name="GIT_DIR"       required="true"/>
         <variableValue name="SOURCE_SUBDIR" required="true"/>
-        <variableValue name="TARGET_PDS"   required="true"/>
-        <variableValue name="SYNC_LOG"     required="true"/>
+        <variableValue name="TARGET_PDS"    required="true"/>
+        <variableValue name="SYNC_LOG"      required="true"/>
         <instructions substitution="true">
-            Uploads all files in ${instance-GIT_DIR}/${instance-SOURCE_SUBDIR}
-            to ${instance-TARGET_PDS} using Zowe CLI dir-to-pds.
+            Zowe CLI is not available in the BPXBATCH environment on this system.
+            Run the following command from your workstation to upload all files
+            from the local clone of the repository:
 
-            Each filename (without extension) becomes a PDS member name.
-            Member names are automatically truncated to 8 characters.
+              zowe zos-files upload dir-to-pds zosmf_workflows/${instance-SOURCE_SUBDIR} "${instance-TARGET_PDS}"
 
-            The sync log is written to ${instance-SYNC_LOG}.
-            If Zowe CLI upload fails the step exits RC=1 and the IEBUPDTE
-            fallback step (iebUpdteFallback) becomes available to run manually.
+            Each file in the directory becomes one PDS member (filename without
+            extension, truncated to 8 characters).
+
+            When the upload completes successfully, mark this step Complete to
+            allow reportSync to run.
         </instructions>
         <weight>10</weight>
-        <autoEnable>true</autoEnable>
-        <template>
-            <inlineTemplate substitution="true"><![CDATA[
-#!/bin/sh
-SRCDIR="]]>${instance-GIT_DIR}<![CDATA[/]]>${instance-SOURCE_SUBDIR}<![CDATA["
-PDS="]]>${instance-TARGET_PDS}<![CDATA["
-LOG="]]>${instance-SYNC_LOG}<![CDATA["
-
-echo "=== Zowe CLI Upload ===" | tee "$LOG"
-echo "Source : $SRCDIR"       | tee -a "$LOG"
-echo "Target : $PDS"          | tee -a "$LOG"
-echo "----------------------" | tee -a "$LOG"
-
-if [ ! -d "$SRCDIR" ]; then
-  echo "ERROR: source directory $SRCDIR not found" | tee -a "$LOG"
-  exit 1
-fi
-
-ZOWE=$(command -v zowe 2>/dev/null)
-if [ -z "$ZOWE" ]; then
-  echo "ERROR: zowe CLI not found on PATH" | tee -a "$LOG"
-  exit 1
-fi
-
-echo "zowe version: $($ZOWE --version)" | tee -a "$LOG"
-
-$ZOWE zos-files upload dir-to-pds "$SRCDIR" "$PDS" --binary false 2>&1 | tee -a "$LOG"
-RC=$?
-
-echo "----------------------" | tee -a "$LOG"
-if [ $RC -eq 0 ]; then
-  COUNT=$(ls "$SRCDIR" | wc -l | tr -d ' ')
-  echo "SUCCESS: $COUNT file(s) uploaded to $PDS" | tee -a "$LOG"
-else
-  echo "FAIL: Zowe CLI upload RC=$RC — run iebUpdteFallback step manually" | tee -a "$LOG"
-  exit 1
-fi
-]]></inlineTemplate>
-            <submitAs>shell-JCL</submitAs>
-            <maxLrecl>1024</maxLrecl>
-        </template>
+        <autoEnable>false</autoEnable>
     </step>
 
     <!-- ============================================================
@@ -213,7 +175,7 @@ fi
     <step name="iebUpdteFallback" optional="true">
         <title>IEBUPDTE Fallback Upload (optional)</title>
         <description>Manual fallback. Runs only if zoweUpload failed or Zowe CLI is unavailable. Uses IEBUPDTE ADD to load every file from the source subdirectory into the target PDS via JCL.</description>
-        <prereqStep name="gitPull"/>
+        <prereqStep name="zoweUpload"/>
         <variableValue name="GIT_DIR"       required="true"/>
         <variableValue name="SOURCE_SUBDIR" required="true"/>
         <variableValue name="TARGET_PDS"    required="true"/>
@@ -253,9 +215,8 @@ RC_TOTAL=0
 for FILEPATH in "$SRCDIR"/*; do
   [ -f "$FILEPATH" ] || continue
   FNAME=$(basename "$FILEPATH")
-  MEMBER=$(echo "$FNAME" | sed 's/\..*//' | cut -c1-8 | tr '[:lower:]' '[:upper:]')
+  MEMBER=$(echo "$FNAME" | sed 's/\..*//' | tr -d '-' | cut -c1-8 | tr '[:lower:]' '[:upper:]')
   echo "Uploading $FNAME as member $MEMBER ..." | tee -a "$LOG"
-  tsocmd "ALLOC F(IEBOUT) DA('$PDS($MEMBER)') SHR REUSE" 2>/dev/null
   cp "$FILEPATH" "//'$PDS($MEMBER)'"
   RC=$?
   if [ $RC -eq 0 ]; then
