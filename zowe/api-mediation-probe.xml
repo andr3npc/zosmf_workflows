@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>api-mediation-probe</workflowID>
+        <workflowDefaultName>Zowe API Mediation Layer Health Probe</workflowDefaultName>
+        <workflowDescription>Probes the Zowe APIML gateway, discovery, and catalog services and writes a health report</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="GATEWAY_VERSION" scope="instance" visibility="public">
+        <label>Gateway Version</label>
+        <abstract>Zowe API Gateway version string captured from /gateway/api/v1/info</abstract>
+        <description>Filled by the probeGateway rest step via propertyMapping on the apiVersion field.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="GATEWAY_STATUS" scope="instance" visibility="public">
+        <label>Gateway HTTP Status</label>
+        <abstract>Actual HTTP status code returned by the gateway probe</abstract>
+        <description>Filled by the probeGateway rest step via actualStatusCode. Expected value: 200.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="DISCOVERY_STATUS" scope="instance" visibility="public">
+        <label>Discovery Service HTTP Status</label>
+        <abstract>Actual HTTP status code returned by the discovery service probe</abstract>
+        <description>Filled by the probeDiscovery rest step via actualStatusCode. Expected value: 200.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="SERVICE_COUNT" scope="instance" visibility="public">
+        <label>Registered Service Count</label>
+        <abstract>Raw application list captured from the Eureka /apps endpoint</abstract>
+        <description>Filled by the probeDiscovery rest step via propertyMapping on applications.application. The count can be read from the number of entries in the captured value.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="CATALOG_STATUS" scope="instance" visibility="public">
+        <label>API Catalog HTTP Status</label>
+        <abstract>Actual HTTP status code returned by the API Catalog probe</abstract>
+        <description>Filled by the probeCatalog rest step via actualStatusCode. Expected value: 200.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="CATALOG_COUNT" scope="instance" visibility="public">
+        <label>API Catalog Container Count</label>
+        <abstract>First catalog container ID captured from /apicatalog/api/v1/containers</abstract>
+        <description>Filled by the probeCatalog rest step via propertyMapping on the first element's id field. Confirms the catalog returned at least one tile.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <variable name="HEALTH_SUMMARY" scope="instance" visibility="public">
+        <label>Health Summary</label>
+        <abstract>Derived one-line summary of all three probe results</abstract>
+        <description>Built by the deriveStatus setVariable step from the three HTTP status variables. Used as the headline in the final health report.</description>
+        <category>APIML</category>
+        <string/>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Probe the API Gateway
+         ============================================================ -->
+
+    <step name="probeGateway">
+        <title>Probe API Gateway</title>
+        <description>Calls GET /gateway/api/v1/info through z/OSMF and captures the gateway version and HTTP status code</description>
+        <instructions>
+            Sends a GET request to the Zowe API Gateway info endpoint.
+            On success (HTTP 200) the apiVersion field is captured into GATEWAY_VERSION
+            and the actual status code into GATEWAY_STATUS.
+            A non-200 response will cause this step to fail immediately.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/gateway/api/v1/info</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+            <actualStatusCode mapTo="GATEWAY_STATUS"/>
+            <propertyMapping mapTo="GATEWAY_VERSION">["apiVersion"]</propertyMapping>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Probe the Discovery Service
+         ============================================================ -->
+
+    <step name="probeDiscovery">
+        <title>Probe Discovery Service</title>
+        <description>Calls GET /eureka/apps to confirm the discovery service is reachable and captures the number of registered services</description>
+        <prereqStep name="probeGateway"/>
+        <instructions>
+            Sends a GET request to the Eureka applications endpoint routed through
+            the Zowe API Gateway. On success (HTTP 200) the length of the
+            applications.application array is captured into SERVICE_COUNT and the
+            actual HTTP status into DISCOVERY_STATUS.
+            A non-200 response will cause this step to fail.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/eureka/apps</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+            <actualStatusCode mapTo="DISCOVERY_STATUS"/>
+            <propertyMapping mapTo="SERVICE_COUNT">["applications"]["application"][0]["instanceId"]</propertyMapping>
+            <requestHeaders>{"Accept":"application/json"}</requestHeaders>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – Probe the API Catalog
+         ============================================================ -->
+
+    <step name="probeCatalog">
+        <title>Probe API Catalog</title>
+        <description>Calls GET /apicatalog/api/v1/containers to confirm the catalog is reachable and captures the number of published API tiles</description>
+        <prereqStep name="probeDiscovery"/>
+        <instructions>
+            Sends a GET request to the API Catalog containers endpoint.
+            On success (HTTP 200) the length of the top-level array is captured
+            into CATALOG_COUNT and the actual HTTP status into CATALOG_STATUS.
+            A non-200 response will cause this step to fail.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/apicatalog/api/v1/containers</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+            <actualStatusCode mapTo="CATALOG_STATUS"/>
+            <propertyMapping mapTo="CATALOG_COUNT">[0]["id"]</propertyMapping>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – Derive health summary string
+         ============================================================ -->
+
+    <step name="deriveStatus">
+        <title>Derive Health Summary</title>
+        <description>Builds a one-line HEALTH_SUMMARY string from the three HTTP status variables using setVariable</description>
+        <prereqStep name="probeCatalog"/>
+        <instructions substitution="true">
+            Constructs a summary from the values captured by the three probe steps:
+              Gateway   : ${instance-GATEWAY_STATUS}  (version ${instance-GATEWAY_VERSION})
+              Discovery : ${instance-DISCOVERY_STATUS} (${instance-SERVICE_COUNT} services registered)
+              Catalog   : ${instance-CATALOG_STATUS}  (${instance-CATALOG_COUNT} API tiles)
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <setVariable name="HEALTH_SUMMARY" substitution="true">GW=${instance-GATEWAY_STATUS} DS=${instance-DISCOVERY_STATUS} CAT=${instance-CATALOG_STATUS} svcs=${instance-SERVICE_COUNT} tiles=${instance-CATALOG_COUNT}</setVariable>
+    </step>
+
+    <!-- ============================================================
+         Step 5 – Write the health report
+         ============================================================ -->
+
+    <step name="writeHealthReport">
+        <title>Write Health Report</title>
+        <description>Prints a formatted health report from all captured variables and exits non-zero if any probe returned a non-200 status</description>
+        <prereqStep name="deriveStatus"/>
+        <instructions substitution="true">
+            Assembles and prints the consolidated APIML health report.
+            The step exits RC=1 if any of the three probed services did not
+            return HTTP 200, making the overall workflow step state Failed so
+            the operator is alerted immediately.
+
+            Current summary: ${instance-HEALTH_SUMMARY}
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+echo "========================================"
+echo "  Zowe APIML Health Report"
+echo "========================================"
+echo "  Gateway version   : ${instance-GATEWAY_VERSION}"
+echo "  Gateway status    : ${instance-GATEWAY_STATUS}"
+echo "  Discovery status  : ${instance-DISCOVERY_STATUS}"
+echo "  Services registered: ${instance-SERVICE_COUNT}"
+echo "  Catalog status    : ${instance-CATALOG_STATUS}"
+echo "  API tiles published: ${instance-CATALOG_COUNT}"
+echo "----------------------------------------"
+echo "  Summary: ${instance-HEALTH_SUMMARY}"
+echo "========================================"
+
+RC=0
+if [ "${instance-GATEWAY_STATUS}"   != "200" ]; then
+  echo "FAIL: API Gateway returned ${instance-GATEWAY_STATUS} (expected 200)"
+  RC=1
+fi
+if [ "${instance-DISCOVERY_STATUS}" != "200" ]; then
+  echo "FAIL: Discovery Service returned ${instance-DISCOVERY_STATUS} (expected 200)"
+  RC=1
+fi
+if [ "${instance-CATALOG_STATUS}"   != "200" ]; then
+  echo "FAIL: API Catalog returned ${instance-CATALOG_STATUS} (expected 200)"
+  RC=1
+fi
+
+if [ $RC -eq 0 ]; then
+  echo "SUCCESS: All three APIML services are healthy"
+fi
+exit $RC
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>

@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>git-to-pds-sync</workflowID>
+        <workflowDefaultName>Git to PDS Sync</workflowDefaultName>
+        <workflowDescription>git pull on USS then uploads all members to a PDS via Zowe CLI</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="GIT_DIR" scope="instance" visibility="public">
+        <label>USS Git Repository Directory</label>
+        <abstract>Full USS path to the local git repository clone</abstract>
+        <description>The directory on USS where the git repository is already cloned. The workflow will run git pull in this directory. Example: /z/andre/repos/my-jcl-repo</description>
+        <category>Git</category>
+        <string>
+            <default>/z/andre/repos/zosmf_workflows</default>
+        </string>
+    </variable>
+
+    <variable name="GIT_BRANCH" scope="instance" visibility="public">
+        <label>Git Branch</label>
+        <abstract>Branch to pull and sync to the PDS</abstract>
+        <description>The branch that will be checked out and pulled before uploading to the PDS. Examples: main, develop, release/v2.1</description>
+        <category>Git</category>
+        <string>
+            <default>main</default>
+        </string>
+    </variable>
+
+    <variable name="SOURCE_SUBDIR" scope="instance" visibility="public">
+        <label>Source Subdirectory</label>
+        <abstract>Subdirectory inside the repo whose files map to PDS members</abstract>
+        <description>Relative path inside GIT_DIR containing the files to upload. Each file becomes one PDS member (filename without extension). Leave as "." to use the repo root. Example: jcl, src/cobol, procedures</description>
+        <category>Git</category>
+        <string>
+            <default>zowe</default>
+        </string>
+    </variable>
+
+    <variable name="TARGET_PDS" scope="instance" visibility="public">
+        <label>Target PDS Dataset Name</label>
+        <abstract>Fully qualified PDS or PDSE to sync files into</abstract>
+        <description>The target partitioned dataset. Must already exist and have sufficient directory blocks and space. Each file in SOURCE_SUBDIR is uploaded as a member of this dataset. Example: ANDRE.JCL.SHARED</description>
+        <category>PDS</category>
+        <string>
+            <default>ANDRE.WFFLOWS</default>
+        </string>
+    </variable>
+
+    <variable name="SYNC_LOG" scope="instance" visibility="public">
+        <label>Sync Log USS File</label>
+        <abstract>USS file path where the sync report is written</abstract>
+        <description>The upload step writes a per-member status line to this file. The reportSync step cats it to STDOUT so results appear on the JES spool. Example: /z/andre/zowe/git-pds-sync.log</description>
+        <category>PDS</category>
+        <string>
+            <default>/z/andre/zowe/git-pds-sync.log</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 - Verify git repo and check out branch
+         ============================================================ -->
+
+    <step name="gitPull">
+        <title>Git Pull</title>
+        <description>Verifies the USS git repository exists, checks out the target branch, and pulls the latest commits from origin</description>
+        <variableValue name="GIT_DIR"    required="true"/>
+        <variableValue name="GIT_BRANCH" required="true"/>
+        <instructions substitution="true">
+            Runs git pull in ${instance-GIT_DIR} on branch ${instance-GIT_BRANCH}.
+
+            Pre-requisites:
+              - The repository must already be cloned at GIT_DIR.
+              - The workflow owner must have read/write access to GIT_DIR.
+              - git must be available on the USS PATH (typically /usr/bin/git
+                or installed under /usr/lpp/tools).
+              - SSH keys or a credential helper must be configured for the
+                remote — this step does not prompt for a password.
+
+            The step exits RC=1 if the directory does not exist, git is not
+            found, the branch does not exist, or the pull fails.
+        </instructions>
+        <weight>5</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+export PATH=/apps/oef11/bin:$PATH
+GIT_DIR="${instance-GIT_DIR}"
+BRANCH="${instance-GIT_BRANCH}"
+
+echo "=== Git Pull ==="
+echo "Repo  : $GIT_DIR"
+echo "Branch: $BRANCH"
+echo "----------------"
+
+if [ ! -d "$GIT_DIR/.git" ]; then
+  echo "ERROR: $GIT_DIR is not a git repository"
+  exit 1
+fi
+
+cd "$GIT_DIR" || exit 1
+
+GIT=$(command -v git 2>/dev/null)
+if [ -z "$GIT" ]; then
+  echo "ERROR: git not found on PATH"
+  exit 1
+fi
+
+echo "git version: $($GIT --version)"
+
+$GIT checkout "$BRANCH"
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo "ERROR: git checkout $BRANCH failed RC=$RC"
+  exit 1
+fi
+
+$GIT pull origin "$BRANCH"
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo "ERROR: git pull failed RC=$RC"
+  exit 1
+fi
+
+echo "----------------"
+echo "HEAD: $($GIT log -1 --oneline)"
+echo "SUCCESS: repo is at latest $BRANCH"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 - Upload all members to PDS via Zowe CLI (primary)
+         ============================================================ -->
+
+    <step name="zoweUpload">
+        <title>Upload to PDS via Zowe CLI</title>
+        <description>Uses zowe zos-files upload dir-to-pds to upload every file in the source subdirectory to the target PDS as individual members</description>
+        <prereqStep name="gitPull"/>
+        <variableValue name="GIT_DIR"      required="true"/>
+        <variableValue name="SOURCE_SUBDIR" required="true"/>
+        <variableValue name="TARGET_PDS"   required="true"/>
+        <variableValue name="SYNC_LOG"     required="true"/>
+        <instructions substitution="true">
+            Uploads all files in ${instance-GIT_DIR}/${instance-SOURCE_SUBDIR}
+            to ${instance-TARGET_PDS} using Zowe CLI dir-to-pds.
+
+            Each filename (without extension) becomes a PDS member name.
+            Member names are automatically truncated to 8 characters.
+
+            The sync log is written to ${instance-SYNC_LOG}.
+            If Zowe CLI upload fails the step exits RC=1 and the IEBUPDTE
+            fallback step (iebUpdteFallback) becomes available to run manually.
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[
+#!/bin/sh
+SRCDIR="]]>${instance-GIT_DIR}<![CDATA[/]]>${instance-SOURCE_SUBDIR}<![CDATA["
+PDS="]]>${instance-TARGET_PDS}<![CDATA["
+LOG="]]>${instance-SYNC_LOG}<![CDATA["
+
+echo "=== Zowe CLI Upload ===" | tee "$LOG"
+echo "Source : $SRCDIR"       | tee -a "$LOG"
+echo "Target : $PDS"          | tee -a "$LOG"
+echo "----------------------" | tee -a "$LOG"
+
+if [ ! -d "$SRCDIR" ]; then
+  echo "ERROR: source directory $SRCDIR not found" | tee -a "$LOG"
+  exit 1
+fi
+
+ZOWE=$(command -v zowe 2>/dev/null)
+if [ -z "$ZOWE" ]; then
+  echo "ERROR: zowe CLI not found on PATH" | tee -a "$LOG"
+  exit 1
+fi
+
+echo "zowe version: $($ZOWE --version)" | tee -a "$LOG"
+
+$ZOWE zos-files upload dir-to-pds "$SRCDIR" "$PDS" --binary false 2>&1 | tee -a "$LOG"
+RC=$?
+
+echo "----------------------" | tee -a "$LOG"
+if [ $RC -eq 0 ]; then
+  COUNT=$(ls "$SRCDIR" | wc -l | tr -d ' ')
+  echo "SUCCESS: $COUNT file(s) uploaded to $PDS" | tee -a "$LOG"
+else
+  echo "FAIL: Zowe CLI upload RC=$RC — run iebUpdteFallback step manually" | tee -a "$LOG"
+  exit 1
+fi
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 - IEBUPDTE fallback (optional, manual)
+         ============================================================ -->
+
+    <step name="iebUpdteFallback" optional="true">
+        <title>IEBUPDTE Fallback Upload (optional)</title>
+        <description>Manual fallback. Runs only if zoweUpload failed or Zowe CLI is unavailable. Uses IEBUPDTE ADD to load every file from the source subdirectory into the target PDS via JCL.</description>
+        <prereqStep name="gitPull"/>
+        <variableValue name="GIT_DIR"       required="true"/>
+        <variableValue name="SOURCE_SUBDIR" required="true"/>
+        <variableValue name="TARGET_PDS"    required="true"/>
+        <variableValue name="SYNC_LOG"      required="true"/>
+        <instructions substitution="true">
+            Fallback path when Zowe CLI is not available or zoweUpload failed.
+
+            This step generates and submits an IEBUPDTE job that:
+              1. Reads each file from ${instance-GIT_DIR}/${instance-SOURCE_SUBDIR}
+                 on USS using BPXBATCH + dd input piped to IEBUPDTE SYSIN.
+              2. Issues ./ ADD NAME=member for each file.
+              3. Writes to ${instance-TARGET_PDS}.
+
+            Only run this step if zoweUpload failed. Do not run both.
+            autoEnable is false — this step requires manual initiation.
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[
+#!/bin/sh
+SRCDIR="]]>${instance-GIT_DIR}<![CDATA[/]]>${instance-SOURCE_SUBDIR}<![CDATA["
+PDS="]]>${instance-TARGET_PDS}<![CDATA["
+LOG="]]>${instance-SYNC_LOG}<![CDATA["
+
+echo "=== IEBUPDTE Fallback ===" | tee -a "$LOG"
+echo "Source : $SRCDIR"         | tee -a "$LOG"
+echo "Target : $PDS"            | tee -a "$LOG"
+echo "------------------------" | tee -a "$LOG"
+
+if [ ! -d "$SRCDIR" ]; then
+  echo "ERROR: source directory $SRCDIR not found" | tee -a "$LOG"
+  exit 1
+fi
+
+RC_TOTAL=0
+for FILEPATH in "$SRCDIR"/*; do
+  [ -f "$FILEPATH" ] || continue
+  FNAME=$(basename "$FILEPATH")
+  MEMBER=$(echo "$FNAME" | sed 's/\..*//' | cut -c1-8 | tr '[:lower:]' '[:upper:]')
+  echo "Uploading $FNAME as member $MEMBER ..." | tee -a "$LOG"
+  tsocmd "ALLOC F(IEBOUT) DA('$PDS($MEMBER)') SHR REUSE" 2>/dev/null
+  cp "$FILEPATH" "//'$PDS($MEMBER)'"
+  RC=$?
+  if [ $RC -eq 0 ]; then
+    echo "  OK: $MEMBER" | tee -a "$LOG"
+  else
+    echo "  FAIL: $MEMBER RC=$RC" | tee -a "$LOG"
+    RC_TOTAL=1
+  fi
+  tsocmd "FREE F(IEBOUT)" 2>/dev/null
+done
+
+echo "------------------------" | tee -a "$LOG"
+if [ $RC_TOTAL -eq 0 ]; then
+  echo "SUCCESS: all members uploaded via fallback" | tee -a "$LOG"
+else
+  echo "WARN: one or more members failed — review log above" | tee -a "$LOG"
+  exit 1
+fi
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 - Report sync results (USS file → spool STDOUT)
+         ============================================================ -->
+
+    <step name="reportSync">
+        <title>Report Sync Results</title>
+        <description>Cats the sync log written by zoweUpload (or iebUpdteFallback) to STDOUT so the full upload report appears on the JES spool</description>
+        <prereqStep name="zoweUpload"/>
+        <variableValue name="SYNC_LOG" required="true"/>
+        <instructions substitution="true">
+            Reads ${instance-SYNC_LOG} and writes it to STDOUT.
+            The full upload report — member names, counts, success/fail status —
+            appears in this step's IZUWFJB job STDOUT DD on the JES spool,
+            visible in z/OSMF and via:
+
+              zowe zos-jobs view all-spool-content &lt;JOBID&gt;
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+LOG="${instance-SYNC_LOG}"
+echo "=== Git to PDS Sync Report ==="
+if [ -f "$LOG" ]; then
+  cat "$LOG"
+  echo "=============================="
+  echo "SUCCESS: report complete"
+else
+  echo "ERROR: sync log not found: $LOG"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>

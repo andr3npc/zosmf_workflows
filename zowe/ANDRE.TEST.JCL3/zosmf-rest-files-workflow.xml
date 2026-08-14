@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>zosmf-rest-files</workflowID>
+        <workflowDefaultName>z/OSMF REST Files API Caller</workflowDefaultName>
+        <workflowDescription>Runs z/OSMF REST Files API via Python script copied from JOVE.JCL.SHARE(PSCRIPT1).</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>ANDRE</vendor>
+    </workflowInfo>
+
+    <variable name="USERID" scope="instance" visibility="private">
+        <label>z/OSMF Userid</label>
+        <abstract>The userid used to authenticate to z/OSMF.</abstract>
+        <description>Enter the TSO userid that will authenticate to the z/OSMF REST Files API.</description>
+        <category>Authentication</category>
+        <string>
+            <default>CHANGEME</default>
+        </string>
+    </variable>
+
+    <variable name="PASSWORD" scope="instance" visibility="private">
+        <label>z/OSMF Password</label>
+        <abstract>Password for the z/OSMF userid.</abstract>
+        <description>Enter the password associated with the userid.</description>
+        <category>Authentication</category>
+        <string>
+            <default>CHANGEME</default>
+        </string>
+    </variable>
+
+    <variable name="PATH" scope="instance" visibility="public">
+        <label>USS Path</label>
+        <abstract>The z/OS UNIX path to process.</abstract>
+        <description>Enter the full USS directory path to list or process via the z/OSMF REST Files API.</description>
+        <category>Input</category>
+        <string>
+            <default>/tmp</default>
+        </string>
+    </variable>
+
+    <step name="submitRestFilesJob">
+        <title>Submit z/OSMF REST Files Job</title>
+        <description>Submits a BPXBATCH job that copies JOVE.JCL.SHARE(PSCRIPT1) to USS and runs it against the specified path.</description>
+        <instructions substitution="true">
+            Submits a batch job that copies the Python script from JOVE.JCL.SHARE(PSCRIPT1)
+            to /tmp/zosmfjcl.py, runs it as:
+            python /tmp/zosmfjcl.py ${instance-USERID} (password) ${instance-PATH}
+            then deletes the temporary script on exit.
+            Review STDOUT in the job spool for API results.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="false">
+//ZMFREST1 JOB (1,1),'     ',NOTIFY=&amp;SYSUID,MSGCLASS=A,REGION=0M
+//*
+//STEP1    EXEC PGM=BPXBATCH
+//SYSPRINT DD SYSOUT=*
+//STDOUT   DD SYSOUT=*
+//STDERR   DD SYSOUT=*
+//SYSUDUMP DD SYSOUT=*
+//STDPARM DD *
+SH
+S=/tmp/zosmfjcl.py;
+H=zos31.pok.stglabs.ibm.com;
+trap "rm -f $S" EXIT;
+cp /u/andre/zosmfjcl.py $S;
+python $S ANDRE liar3wai /z/andre $H
+/*
+//*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+</workflow>

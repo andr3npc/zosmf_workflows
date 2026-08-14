@@ -54,6 +54,13 @@ zowe zos-workflows create workflow-from-uss-file "my-workflow" \
 |---|---|---|---|
 | [workflow-script-examples.xml](examples/workflow-script-examples.xml) | `script-examples` | six steps: inline REXX, REXX from dataset, inline shell, shell from file, advanced REXX, advanced shell | Tutorial workflow demonstrating REXX and shell script steps with variable passing between steps. |
 
+### zowe/
+
+| Workflow | ID | Steps | Purpose |
+|---|---|---|---|
+| [api-mediation-probe.xml](zowe/api-mediation-probe.xml) | `api-mediation-probe` | probeGateway, probeDiscovery, probeCatalog, deriveStatus, writeHealthReport | Probes the Zowe API Gateway, Discovery Service, and API Catalog via REST calls; captures HTTP status codes and service/tile counts; writes a consolidated health report and fails the workflow if any service is not HTTP 200. |
+| [git-to-pds-sync.xml](zowe/git-to-pds-sync.xml) | `git-to-pds-sync` | gitPull, zoweUpload, iebUpdteFallback (optional), reportSync | Pulls a USS git repository to a chosen branch then uploads all files in a source subdirectory to a PDS as members via Zowe CLI, with an IEBUPDTE-based fallback if Zowe CLI is unavailable. Sync report is written to a USS log file and surfaced on the JES spool. |
+
 ## Notes on provenance and encoding
 
 - Source: `/z/andre` on the ZOS31 test system. All files are stored here as UTF-8 with the XML declarations matching.

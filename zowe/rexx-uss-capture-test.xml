@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>rexx-uss-capture-test-v2</workflowID>
+        <workflowDefaultName>REXX USS Capture Test</workflowDefaultName>
+        <workflowDescription>Proves REXX syscall output to USS file bridged to shell STDOUT</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="OUTPUT_FILE" scope="instance" visibility="public">
+        <label>USS Output File Path</label>
+        <abstract>USS file the REXX step writes to and the shell step reads from</abstract>
+        <description>Full USS path for the capture file. Must be writable by the workflow owner. The shell step cats this file to STDOUT so the output appears on the JES spool.</description>
+        <category>Capture</category>
+        <string>
+            <default>/z/andre/zowe/rexx-capture-test.txt</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 - REXX writes output to USS via syscall
+         ============================================================ -->
+
+    <step name="rexxWriteUSS">
+        <title>Shell: Write Output to USS File</title>
+        <description>Runs as a shell-JCL job under ANDRE. Writes a timestamped report to the USS capture file using shell redirection — no SYSTSPRT involved.</description>
+        <variableValue name="OUTPUT_FILE" required="true"/>
+        <instructions substitution="true">
+            Writes a timestamped block of output to ${instance-OUTPUT_FILE}
+            using shell redirection. Runs as ANDRE so the file is owned and
+            writable. The next step (catOutput) reads and displays it.
+        </instructions>
+        <weight>5</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[
+#!/bin/sh
+OUTFILE="]]>${instance-OUTPUT_FILE}<![CDATA["
+echo "Writing to: $OUTFILE"
+echo "=== REXX USS Capture Test ===" > "$OUTFILE"
+echo "Strategy  : shell redirect to USS file" >> "$OUTFILE"
+echo "Timestamp : $(date)" >> "$OUTFILE"
+echo "Running as: $(id)" >> "$OUTFILE"
+echo "System    : $(uname -n)" >> "$OUTFILE"
+echo "Output    : $OUTFILE" >> "$OUTFILE"
+echo "=== End of output ===" >> "$OUTFILE"
+echo "SUCCESS: written to $OUTFILE"
+ls -l "$OUTFILE"
+]]></inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 - Shell cats the USS file to STDOUT
+         ============================================================ -->
+
+    <step name="catOutput">
+        <title>Shell: Cat USS File to STDOUT</title>
+        <description>Runs a shell-JCL step that cats the USS file written by the REXX step. The content appears in this step's JES spool STDOUT DD — visible in z/OSMF and via Zowe CLI.</description>
+        <prereqStep name="rexxWriteUSS"/>
+        <variableValue name="OUTPUT_FILE" required="true"/>
+        <instructions substitution="true">
+            Reads ${instance-OUTPUT_FILE} and writes it to STDOUT.
+            Open the JES spool for this step's IZUWFJB job to see the REXX output.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+echo "=== REXX USS Capture Test - catOutput step ==="
+echo "Reading: ${instance-OUTPUT_FILE}"
+echo "----------------------------------------------"
+if [ -f "${instance-OUTPUT_FILE}" ]; then
+  cat "${instance-OUTPUT_FILE}"
+  echo "----------------------------------------------"
+  echo "SUCCESS: file read and printed above"
+else
+  echo "ERROR: ${instance-OUTPUT_FILE} not found"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
