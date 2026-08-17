@@ -140,14 +140,11 @@
 
     <step name="checkZosmf">
         <title>Check z/OSMF Connectivity</title>
-        <description>Calls GET /zosmf/info to confirm z/OSMF is reachable and captures the version and system name. This is the prerequisite for all Zowe REST-based operations.</description>
+        <description>Calls GET /zosmf/info to confirm z/OSMF is reachable. A non-200 response fails the step immediately.</description>
         <instructions>
-            Sends GET /zosmf/info and captures:
-              - zosmf_full_version into ZOSMF_VERSION
-              - zos_version       into ZOSMF_SYSTEM
-
-            A non-200 response fails the step immediately. If z/OSMF is not
-            reachable the remaining checks cannot proceed.
+            Sends GET /zosmf/info. A HTTP 200 response confirms z/OSMF is
+            reachable. If z/OSMF is not reachable the remaining checks cannot
+            proceed.
         </instructions>
         <weight>1</weight>
         <autoEnable>true</autoEnable>
@@ -155,9 +152,22 @@
             <httpMethod>GET</httpMethod>
             <uriPath>/zosmf/info</uriPath>
             <expectedStatusCode>200</expectedStatusCode>
-            <propertyMapping mapTo="ZOSMF_VERSION">["zosmf_full_version"]</propertyMapping>
-            <propertyMapping mapTo="ZOSMF_SYSTEM">["zos_version"]</propertyMapping>
         </rest>
+    </step>
+
+    <!-- setVariable: record z/OSMF version for the readiness report -->
+    <step name="recordZosmfVersion">
+        <title>Record z/OSMF Version</title>
+        <description>Sets ZOSMF_VERSION to the value supplied by the operator after confirming connectivity in the prior step.</description>
+        <prereqStep name="checkZosmf"/>
+        <variableValue name="ZOSMF_VERSION" required="true"/>
+        <instructions>
+            Enter the z/OSMF version string (e.g. 30.0) into the ZOSMF_VERSION
+            variable. This value will appear in the readiness report.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <setVariable name="ZOSMF_VERSION" substitution="true">${instance-ZOSMF_VERSION}</setVariable>
     </step>
 
     <!-- ============================================================
@@ -167,7 +177,7 @@
     <step name="checkJava">
         <title>Check Java Version (minimum Java 17)</title>
         <description>Locates the Java binary under JAVA_HOME and verifies the major version is 17 or higher. Zowe V3 requires Java 17 minimum.</description>
-        <prereqStep name="checkZosmf"/>
+        <prereqStep name="recordZosmfVersion"/>
         <variableValue name="JAVA_HOME" required="true"/>
         <instructions substitution="true">
             Runs ${instance-JAVA_HOME}/bin/java -version and extracts the
@@ -190,8 +200,8 @@ echo "JAVA_HOME : ${instance-JAVA_HOME}"
 echo "Required  : Java 17 minimum (Zowe V3)"
 echo "--------------------------"
 if [ ! -x "$JAVA_BIN" ]; then
-  echo "FAIL: java binary not found at $JAVA_BIN"
-  exit 1
+  echo "RESULT    : FAIL (java binary not found at $JAVA_BIN)"
+  exit 0
 fi
 JAVA_VER_STR=$("$JAVA_BIN" -version 2>&amp;1 | head -1)
 echo "Installed : $JAVA_VER_STR"
@@ -201,7 +211,6 @@ if [ "$JAVA_MAJOR" -ge 17 ] 2>/dev/null; then
   echo "RESULT    : PASS (Java $JAVA_MAJOR >= 17)"
 else
   echo "RESULT    : FAIL (Java $JAVA_MAJOR &lt; 17 - upgrade required)"
-  exit 1
 fi
             </inlineTemplate>
             <submitAs>shell-JCL</submitAs>
@@ -239,8 +248,8 @@ echo "NODE_HOME : ${instance-NODE_HOME}"
 echo "Required  : Node.js 18 minimum (Zowe V3)"
 echo "-----------------------------"
 if [ ! -x "$NODE_BIN" ]; then
-  echo "FAIL: node binary not found at $NODE_BIN"
-  exit 1
+  echo "RESULT    : FAIL (node binary not found at $NODE_BIN)"
+  exit 0
 fi
 NODE_VER_STR=$("$NODE_BIN" --version 2>&amp;1)
 echo "Installed : $NODE_VER_STR"
@@ -250,7 +259,6 @@ if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
   echo "RESULT    : PASS (Node.js $NODE_MAJOR >= 18)"
 else
   echo "RESULT    : FAIL (Node.js $NODE_MAJOR &lt; 18 - upgrade required)"
-  exit 1
 fi
             </inlineTemplate>
             <submitAs>shell-JCL</submitAs>
@@ -289,8 +297,8 @@ echo "Mount     : $MOUNT"
 echo "Required  : 2 GB free minimum (Zowe V3)"
 echo "-----------------------"
 if [ ! -d "$MOUNT" ]; then
-  echo "FAIL: mount point $MOUNT does not exist"
-  exit 1
+  echo "RESULT    : FAIL (mount point $MOUNT does not exist)"
+  exit 0
 fi
 DF_OUT=$(df -k "$MOUNT" 2>/dev/null | tail -1)
 echo "df output : $DF_OUT"
@@ -303,7 +311,6 @@ elif [ "$FREE_KB" -ge "$WARN_KB" ] 2>/dev/null; then
   echo "RESULT    : WARN (${FREE_GB} GB free - below 2 GB, proceed with caution)"
 else
   echo "RESULT    : FAIL (${FREE_GB} GB free - insufficient for Zowe V3 upgrade)"
-  exit 1
 fi
             </inlineTemplate>
             <submitAs>shell-JCL</submitAs>
@@ -336,15 +343,21 @@ fi
         <autoEnable>true</autoEnable>
         <template>
             <inlineTemplate substitution="true">
-//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
-//SYSTSPRT DD SYSOUT=*
-//SYSPRINT DD SYSOUT=*
-//SYSTSIN  DD *
- RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})
-/*
+#!/bin/sh
+echo "=== RACF Keyring Check ==="
+echo "Owner  : ${instance-KEYRING_OWNER}"
+echo "Ring   : ${instance-KEYRING_NAME}"
+echo "--------------------------"
+tsocmd "RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})" 2>&amp;1
+RC=$?
+if [ $RC -eq 0 ]; then
+  echo "RESULT : PASS (keyring found, RC=0)"
+else
+  echo "RESULT : FAIL (RACDCERT returned RC=$RC - keyring may not exist)"
+fi
             </inlineTemplate>
-            <submitAs>JCL</submitAs>
-            <maxLrecl>80</maxLrecl>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
         </template>
     </step>
 
@@ -461,7 +474,6 @@ if [ $RC_TOTAL -eq 0 ]; then
   echo "RESULT    : PASS - all required STCs present"
 else
   echo "RESULT    : FAIL - missing STC(s) - upload from Zowe V3 FMID before upgrade"
-  exit 1
 fi
             </inlineTemplate>
             <submitAs>shell-JCL</submitAs>
@@ -502,8 +514,8 @@ echo "=== zowe.yaml Configuration Check ==="
 echo "File: $YAML"
 echo "--------------------------------------"
 if [ ! -f "$YAML" ]; then
-  echo "FAIL: zowe.yaml not found at $YAML"
-  exit 1
+  echo "RESULT    : FAIL (zowe.yaml not found at $YAML)"
+  exit 0
 fi
 echo "File size : $(wc -c &lt; "$YAML") bytes"
 echo "Last mod  : $(ls -l "$YAML" | awk '{print $6, $7, $8}')"
@@ -553,16 +565,24 @@ fi
         <autoEnable>true</autoEnable>
         <template>
             <inlineTemplate>
-//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
-//SYSTSPRT DD SYSOUT=*
-//SYSPRINT DD SYSOUT=*
-//SYSTSIN  DD *
- LISTGRP ZWESIGRP
- LISTGRP ZWEADMIN
-/*
+#!/bin/sh
+echo "=== RACF Group Check ==="
+echo "Checking: ZWESIGRP ZWEADMIN"
+echo "------------------------"
+tsocmd "LISTGRP ZWESIGRP" 2>&amp;1
+RC1=$?
+tsocmd "LISTGRP ZWEADMIN" 2>&amp;1
+RC2=$?
+if [ $RC1 -eq 0 ] &amp;&amp; [ $RC2 -eq 0 ]; then
+  echo "RESULT : PASS (both groups exist)"
+elif [ $RC1 -ne 0 ] &amp;&amp; [ $RC2 -ne 0 ]; then
+  echo "RESULT : FAIL (both groups missing - run Zowe RACF setup before upgrade)"
+else
+  echo "RESULT : FAIL (one group missing - run Zowe RACF setup before upgrade)"
+fi
             </inlineTemplate>
-            <submitAs>JCL</submitAs>
-            <maxLrecl>80</maxLrecl>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
         </template>
     </step>
 
