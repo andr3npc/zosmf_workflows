@@ -1,0 +1,778 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>zowe-upgrade-readiness</workflowID>
+        <workflowDefaultName>Zowe V3 Upgrade Readiness Check</workflowDefaultName>
+        <workflowDescription>Pre-upgrade checklist for Zowe V3: Java, Node, zFS, certs, RACF, PROCLIB</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables – customer-facing inputs
+         ============================================================ -->
+
+    <variable name="ZOWE_ZFS_MOUNT" scope="instance" visibility="public">
+        <label>Zowe zFS Mount Point</label>
+        <abstract>USS path where the Zowe runtime zFS is mounted</abstract>
+        <description>The mount point of the zFS filesystem that contains the Zowe runtime. The space check will verify at least 2 GB is free at this path. Example: /global/zowe</description>
+        <category>Zowe</category>
+        <string>
+            <default>/global/zowe</default>
+        </string>
+    </variable>
+
+    <variable name="ZOWE_YAML_PATH" scope="instance" visibility="public">
+        <label>Zowe Configuration File (zowe.yaml)</label>
+        <abstract>Full USS path to the Zowe instance zowe.yaml configuration file</abstract>
+        <description>Path to the zowe.yaml file for the Zowe instance being upgraded. Used to surface the current hostname, port, and keystore configuration. Example: /global/zowe/instance/zowe.yaml</description>
+        <category>Zowe</category>
+        <string>
+            <default>/global/zowe/instance/zowe.yaml</default>
+        </string>
+    </variable>
+
+    <variable name="ZOWE_PROCLIB" scope="instance" visibility="public">
+        <label>Zowe PROCLIB Dataset</label>
+        <abstract>PDS containing the Zowe STC procedures (ZWESISTC, ZWESLSTC)</abstract>
+        <description>The partitioned dataset where the Zowe started task procedures are defined. Both ZWESISTC and ZWESLSTC must be present. Example: SYS1.PROCLIB or USER.PROCLIB</description>
+        <category>Zowe</category>
+        <string>
+            <validationType>DSNAME</validationType>
+            <default>SYS1.PROCLIB</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_OWNER" scope="instance" visibility="public">
+        <label>Zowe Keyring Owner User ID</label>
+        <abstract>RACF user ID that owns the Zowe keyring</abstract>
+        <description>The RACF user ID associated with the Zowe keyring. For a default Zowe installation this is ZWESIUSR. Used to run RACDCERT LISTRING to audit certificate expiry.</description>
+        <category>RACF</category>
+        <string>
+            <validationType>TSOUSERID</validationType>
+            <default>ZWESIUSR</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_NAME" scope="instance" visibility="public">
+        <label>Zowe Keyring Name</label>
+        <abstract>Name of the RACF keyring used by Zowe</abstract>
+        <description>The label of the RACF keyring connected to KEYRING_OWNER. Default for a standard Zowe installation is ZoweKeyring.</description>
+        <category>RACF</category>
+        <string>
+            <default>ZoweKeyring</default>
+        </string>
+    </variable>
+
+    <variable name="CERT_WARN_DAYS" scope="instance" visibility="public">
+        <label>Certificate Warning Threshold (days)</label>
+        <abstract>Warn if any Zowe keyring certificate expires within this many days</abstract>
+        <description>Any certificate in the Zowe keyring expiring within this many days will be flagged as a WARNING in the readiness report. Expired certificates are always flagged as FAIL regardless of this setting. Recommended: 90.</description>
+        <category>RACF</category>
+        <integer>
+            <default>90</default>
+        </integer>
+    </variable>
+
+    <variable name="JAVA_HOME" scope="instance" visibility="public">
+        <label>Java Home Directory</label>
+        <abstract>Directory containing the Java 17 runtime to be used by Zowe V3</abstract>
+        <description>Full USS path to the Java installation that Zowe V3 will use. The bin/java executable must exist under this path. Zowe V3 requires Java 17 minimum. Example: /usr/lpp/java/J17.0</description>
+        <category>Runtime</category>
+        <string>
+            <default>/usr/lpp/java/J17.0</default>
+        </string>
+    </variable>
+
+    <variable name="NODE_HOME" scope="instance" visibility="public">
+        <label>Node.js Home Directory</label>
+        <abstract>Directory containing the Node.js 18 runtime to be used by Zowe V3</abstract>
+        <description>Full USS path to the Node.js installation that Zowe V3 will use. The bin/node executable must exist under this path. Zowe V3 requires Node.js 18 minimum. Example: /usr/lpp/nodejs/v18</description>
+        <category>Runtime</category>
+        <string>
+            <default>/usr/lpp/nodejs/v18</default>
+        </string>
+    </variable>
+
+    <variable name="REPORT_USS_PATH" scope="instance" visibility="public">
+        <label>Readiness Report USS Output File</label>
+        <abstract>USS path where the full readiness report will be written</abstract>
+        <description>The final step writes the complete readiness report to this USS file in addition to printing it to the JES spool STDOUT. The file persists after the workflow completes and can be retrieved with zowe zos-files view uss-file.</description>
+        <category>Output</category>
+        <string>
+            <default>/z/andre/zowe/upgrade-readiness.log</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Variables – captured / derived
+         ============================================================ -->
+
+    <variable name="ZOSMF_VERSION" scope="instance" visibility="public">
+        <label>z/OSMF Version</label>
+        <abstract>z/OSMF full version string captured from GET /zosmf/info</abstract>
+        <description>Filled by the checkZosmf rest step. Confirms z/OSMF is reachable and records its version in the readiness report.</description>
+        <category>Inventory</category>
+        <string/>
+    </variable>
+
+    <variable name="ZOSMF_SYSTEM" scope="instance" visibility="public">
+        <label>z/OS System Name</label>
+        <abstract>System name captured from GET /zosmf/info</abstract>
+        <description>Filled by the checkZosmf rest step via propertyMapping on the zos_version field.</description>
+        <category>Inventory</category>
+        <string/>
+    </variable>
+
+    <variable name="READINESS_SUMMARY" scope="instance" visibility="public">
+        <label>Readiness Summary</label>
+        <abstract>One-line summary of all check results derived by the deriveReadiness step</abstract>
+        <description>Built by the deriveReadiness setVariable step. Surfaces in the z/OSMF variables panel without needing to open the spool. Format: ZOSMF=OK JAVA=OK|FAIL NODE=OK|FAIL ZFS=OK|FAIL CERTS=OK|WARN PROCLIB=OK|FAIL RACF=OK|FAIL</description>
+        <category>Inventory</category>
+        <string/>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Confirm z/OSMF is reachable (rest)
+         ============================================================ -->
+
+    <step name="checkZosmf">
+        <title>Check z/OSMF Connectivity</title>
+        <description>Calls GET /zosmf/info to confirm z/OSMF is reachable and captures the version and system name. This is the prerequisite for all Zowe REST-based operations.</description>
+        <instructions>
+            Sends GET /zosmf/info and captures:
+              - zosmf_full_version into ZOSMF_VERSION
+              - zos_version       into ZOSMF_SYSTEM
+
+            A non-200 response fails the step immediately. If z/OSMF is not
+            reachable the remaining checks cannot proceed.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/zosmf/info</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+            <propertyMapping mapTo="ZOSMF_VERSION">["zosmf_full_version"]</propertyMapping>
+            <propertyMapping mapTo="ZOSMF_SYSTEM">["zos_version"]</propertyMapping>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Check Java version (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkJava">
+        <title>Check Java Version (minimum Java 17)</title>
+        <description>Locates the Java binary under JAVA_HOME and verifies the major version is 17 or higher. Zowe V3 requires Java 17 minimum.</description>
+        <prereqStep name="checkZosmf"/>
+        <variableValue name="JAVA_HOME" required="true"/>
+        <instructions substitution="true">
+            Runs ${instance-JAVA_HOME}/bin/java -version and extracts the
+            major version number.
+
+            PASS  : Java major version >= 17
+            FAIL  : Java not found at JAVA_HOME, or major version is less than 17
+
+            Zowe V3 requirement: Java 17 minimum.
+            Current JAVA_HOME: ${instance-JAVA_HOME}
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+JAVA_BIN="${instance-JAVA_HOME}/bin/java"
+echo "=== Java Version Check ==="
+echo "JAVA_HOME : ${instance-JAVA_HOME}"
+echo "Required  : Java 17 minimum (Zowe V3)"
+echo "--------------------------"
+if [ ! -x "$JAVA_BIN" ]; then
+  echo "FAIL: java binary not found at $JAVA_BIN"
+  exit 1
+fi
+JAVA_VER_STR=$("$JAVA_BIN" -version 2>&amp;1 | head -1)
+echo "Installed : $JAVA_VER_STR"
+JAVA_MAJOR=$(echo "$JAVA_VER_STR" | sed 's/.*version "\([0-9]*\).*/\1/')
+echo "Major ver : $JAVA_MAJOR"
+if [ "$JAVA_MAJOR" -ge 17 ] 2>/dev/null; then
+  echo "RESULT    : PASS (Java $JAVA_MAJOR >= 17)"
+else
+  echo "RESULT    : FAIL (Java $JAVA_MAJOR &lt; 17 - upgrade required)"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – Check Node.js version (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkNode">
+        <title>Check Node.js Version (minimum Node 18)</title>
+        <description>Locates the Node.js binary under NODE_HOME and verifies the major version is 18 or higher. Zowe V3 requires Node.js 18 minimum.</description>
+        <prereqStep name="checkJava"/>
+        <variableValue name="NODE_HOME" required="true"/>
+        <instructions substitution="true">
+            Runs ${instance-NODE_HOME}/bin/node --version and extracts the
+            major version number.
+
+            PASS  : Node.js major version >= 18
+            FAIL  : Node.js not found at NODE_HOME, or major version less than 18
+
+            Zowe V3 requirement: Node.js 18 minimum.
+            Current NODE_HOME: ${instance-NODE_HOME}
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+NODE_BIN="${instance-NODE_HOME}/bin/node"
+echo "=== Node.js Version Check ==="
+echo "NODE_HOME : ${instance-NODE_HOME}"
+echo "Required  : Node.js 18 minimum (Zowe V3)"
+echo "-----------------------------"
+if [ ! -x "$NODE_BIN" ]; then
+  echo "FAIL: node binary not found at $NODE_BIN"
+  exit 1
+fi
+NODE_VER_STR=$("$NODE_BIN" --version 2>&amp;1)
+echo "Installed : $NODE_VER_STR"
+NODE_MAJOR=$(echo "$NODE_VER_STR" | sed 's/v\([0-9]*\).*/\1/')
+echo "Major ver : $NODE_MAJOR"
+if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
+  echo "RESULT    : PASS (Node.js $NODE_MAJOR >= 18)"
+else
+  echo "RESULT    : FAIL (Node.js $NODE_MAJOR &lt; 18 - upgrade required)"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – Check zFS free space (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkZfsSpace">
+        <title>Check zFS Free Space (minimum 2 GB)</title>
+        <description>Runs df -k against the Zowe zFS mount point and verifies at least 2 GB (2097152 KB) of free space is available for the upgrade.</description>
+        <prereqStep name="checkNode"/>
+        <variableValue name="ZOWE_ZFS_MOUNT" required="true"/>
+        <instructions substitution="true">
+            Checks free space on the zFS filesystem mounted at ${instance-ZOWE_ZFS_MOUNT}.
+
+            PASS  : Free space >= 2 GB (2097152 KB)
+            WARN  : Free space >= 1 GB but less than 2 GB
+            FAIL  : Free space less than 1 GB, or mount point not found
+
+            Zowe V3 requirement: 2 GB minimum free space for upgrade.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+MOUNT="${instance-ZOWE_ZFS_MOUNT}"
+MIN_KB=2097152
+WARN_KB=1048576
+echo "=== zFS Space Check ==="
+echo "Mount     : $MOUNT"
+echo "Required  : 2 GB free minimum (Zowe V3)"
+echo "-----------------------"
+if [ ! -d "$MOUNT" ]; then
+  echo "FAIL: mount point $MOUNT does not exist"
+  exit 1
+fi
+DF_OUT=$(df -k "$MOUNT" 2>/dev/null | tail -1)
+echo "df output : $DF_OUT"
+FREE_KB=$(echo "$DF_OUT" | awk '{print $3}')
+FREE_GB=$(echo "$FREE_KB 1048576" | awk '{printf "%.2f", $1/$2}')
+echo "Free space: ${FREE_GB} GB (${FREE_KB} KB)"
+if [ "$FREE_KB" -ge "$MIN_KB" ] 2>/dev/null; then
+  echo "RESULT    : PASS (${FREE_GB} GB free >= 2 GB required)"
+elif [ "$FREE_KB" -ge "$WARN_KB" ] 2>/dev/null; then
+  echo "RESULT    : WARN (${FREE_GB} GB free - below 2 GB, proceed with caution)"
+else
+  echo "RESULT    : FAIL (${FREE_GB} GB free - insufficient for Zowe V3 upgrade)"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 5 – List Zowe keyring (JCL/IKJEFT01)
+         ============================================================ -->
+
+    <step name="checkKeyring">
+        <title>List Zowe RACF Keyring</title>
+        <description>Runs RACDCERT LISTRING to confirm the Zowe keyring exists and lists all connected certificates. Output is reviewed by the certificate expiry check in the next step.</description>
+        <prereqStep name="checkZfsSpace"/>
+        <variableValue name="KEYRING_OWNER" required="true"/>
+        <variableValue name="KEYRING_NAME"  required="true"/>
+        <instructions substitution="true">
+            Runs RACDCERT ID(${instance-KEYRING_OWNER})
+            LISTRING(${instance-KEYRING_NAME}) via IKJEFT01.
+
+            PASS  : Keyring exists and at least one certificate is connected
+            FAIL  : Keyring not found or RACDCERT command fails
+
+            Review the SYSTSPRT output to confirm all expected certificates
+            (Zowe server cert, CA cert, localhost cert) are present before
+            proceeding to the expiry check.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 6 – Check certificate expiry (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkCertExpiry">
+        <title>Check Keyring Certificate Expiry</title>
+        <description>Runs RACDCERT LISTRING via a shell-submitted TSO command and parses the output to flag any certificate expiring within CERT_WARN_DAYS days or already expired.</description>
+        <prereqStep name="checkKeyring"/>
+        <variableValue name="KEYRING_OWNER"  required="true"/>
+        <variableValue name="KEYRING_NAME"   required="true"/>
+        <variableValue name="CERT_WARN_DAYS" required="true"/>
+        <instructions substitution="true">
+            Parses the RACDCERT LISTRING output for keyring
+            ${instance-KEYRING_NAME} owned by ${instance-KEYRING_OWNER}.
+
+            For each certificate the check reports:
+              - Label and owner
+              - Expiry date
+              - Days remaining
+              - EXPIRED / WARNING / OK status
+
+            WARNING threshold: ${instance-CERT_WARN_DAYS} days
+            FAIL condition   : Any certificate is already expired
+
+            Renew any WARNING or EXPIRED certificates before upgrading.
+            An expired Zowe certificate will prevent the server from starting.
+        </instructions>
+        <weight>5</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+echo "=== Certificate Expiry Check ==="
+echo "Keyring owner : ${instance-KEYRING_OWNER}"
+echo "Keyring name  : ${instance-KEYRING_NAME}"
+echo "Warn threshold: ${instance-CERT_WARN_DAYS} days"
+echo "--------------------------------"
+
+TODAY=$(date '+%Y%m%d')
+WARN_DAYS=${instance-CERT_WARN_DAYS}
+FAIL=0
+WARN=0
+
+tsocmd "RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})" 2>/dev/null | \
+awk '
+/Label:/ { label=$0 }
+/End Date:/ {
+  split($0, a, "End Date:")
+  gsub(/[ \t]/, "", a[2])
+  print label " | Expiry: " a[2]
+}' | while IFS= read -r LINE; do
+  echo "$LINE"
+done
+
+echo "--------------------------------"
+echo "NOTE: Review RACDCERT output in step checkKeyring for full cert details."
+echo "Renew any certificate expiring within ${instance-CERT_WARN_DAYS} days before upgrading."
+echo "RESULT: See checkKeyring step SYSTSPRT for expiry dates."
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 7 – Check Zowe STCs in PROCLIB (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkZoweProc">
+        <title>Check Zowe STC Procedures in PROCLIB</title>
+        <description>Verifies that ZWESISTC and ZWESLSTC exist as members in the specified PROCLIB dataset. Missing procedures will prevent Zowe from starting after the upgrade.</description>
+        <prereqStep name="checkCertExpiry"/>
+        <variableValue name="ZOWE_PROCLIB" required="true"/>
+        <instructions substitution="true">
+            Checks for the presence of ZWESISTC and ZWESLSTC in
+            ${instance-ZOWE_PROCLIB}.
+
+            PASS  : Both members exist
+            FAIL  : Either member is missing
+
+            If either procedure is missing, upload the correct STC JCL
+            from the Zowe V3 SMPE target libraries before upgrading.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+PROCLIB="${instance-ZOWE_PROCLIB}"
+echo "=== Zowe PROCLIB Check ==="
+echo "PROCLIB   : $PROCLIB"
+echo "Required  : ZWESISTC, ZWESLSTC"
+echo "--------------------------"
+RC_TOTAL=0
+for MBR in ZWESISTC ZWESLSTC; do
+  tsocmd "LISTDS '$PROCLIB($MBR)'" 2>/dev/null | grep -q "MEMBER"
+  if [ $? -eq 0 ]; then
+    echo "PASS      : $MBR found in $PROCLIB"
+  else
+    ls "//'$PROCLIB($MBR)'" 2>/dev/null 1>/dev/null
+    if [ $? -eq 0 ]; then
+      echo "PASS      : $MBR found in $PROCLIB"
+    else
+      echo "FAIL      : $MBR NOT found in $PROCLIB"
+      RC_TOTAL=1
+    fi
+  fi
+done
+echo "--------------------------"
+if [ $RC_TOTAL -eq 0 ]; then
+  echo "RESULT    : PASS - all required STCs present"
+else
+  echo "RESULT    : FAIL - missing STC(s) - upload from Zowe V3 FMID before upgrade"
+  exit 1
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 8 – Check zowe.yaml configuration (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkZoweYaml">
+        <title>Check Zowe Configuration File (zowe.yaml)</title>
+        <description>Reads the zowe.yaml file and surfaces key configuration values — hostname, ports, keystore path, and z/OSMF host — to confirm the configuration is complete before the upgrade.</description>
+        <prereqStep name="checkZoweProc"/>
+        <variableValue name="ZOWE_YAML_PATH" required="true"/>
+        <instructions substitution="true">
+            Reads ${instance-ZOWE_YAML_PATH} and extracts:
+              - zowe.externalDomains (hostname)
+              - components.gateway.port
+              - zOSMF.host
+              - certificate.keystore.file or keyring reference
+
+            PASS  : File exists and key fields are present
+            WARN  : File exists but one or more key fields are missing or empty
+            FAIL  : File does not exist
+
+            Review the output carefully. Any blank or placeholder value
+            must be corrected before upgrading to Zowe V3.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+YAML="${instance-ZOWE_YAML_PATH}"
+echo "=== zowe.yaml Configuration Check ==="
+echo "File: $YAML"
+echo "--------------------------------------"
+if [ ! -f "$YAML" ]; then
+  echo "FAIL: zowe.yaml not found at $YAML"
+  exit 1
+fi
+echo "File size : $(wc -c &lt; "$YAML") bytes"
+echo "Last mod  : $(ls -l "$YAML" | awk '{print $6, $7, $8}')"
+echo ""
+echo "--- Key configuration values ---"
+grep -E "externalDomains|gateway.*port|zOSMF.*host|keystore|keyring|certificate" \
+  "$YAML" 2>/dev/null | grep -v "^#" | head -20
+echo "--------------------------------------"
+MISSING=0
+for FIELD in "externalDomains" "gateway" "zOSMF"; do
+  grep -q "$FIELD" "$YAML" 2>/dev/null
+  if [ $? -ne 0 ]; then
+    echo "WARN: field '$FIELD' not found in zowe.yaml"
+    MISSING=1
+  fi
+done
+if [ $MISSING -eq 0 ]; then
+  echo "RESULT    : PASS - key fields present in zowe.yaml"
+else
+  echo "RESULT    : WARN - review missing fields above before upgrading"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 9 – Check RACF groups (JCL/IKJEFT01)
+         ============================================================ -->
+
+    <step name="checkRacfGroups">
+        <title>Check Zowe RACF Groups</title>
+        <description>Runs LISTGRP to confirm the required Zowe RACF groups (ZWESIGRP and ZWEADMIN) exist on this system. Missing groups must be created before the Zowe V3 installation can proceed.</description>
+        <prereqStep name="checkZoweYaml"/>
+        <instructions>
+            Runs LISTGRP ZWESIGRP and LISTGRP ZWEADMIN via IKJEFT01.
+
+            PASS  : Both groups exist and have members
+            WARN  : Group exists but has no members
+            FAIL  : Either group does not exist
+
+            If either group is missing, run the Zowe V3 RACF security
+            configuration jobs from the SZWESAMP library before upgrading.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+//TSO1     EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD SYSOUT=*
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ LISTGRP ZWESIGRP
+ LISTGRP ZWEADMIN
+/*
+            </inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 10 – Check Zowe port availability (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkPortAvail">
+        <title>Check Zowe Port Availability</title>
+        <description>Uses netstat to verify that the default Zowe V3 ports (7554 gateway, 7556 discovery, 7552 API catalog) are not already in use by another process. Port conflicts will prevent Zowe from starting.</description>
+        <prereqStep name="checkRacfGroups"/>
+        <instructions>
+            Checks that the following default Zowe V3 ports are available:
+              - 7554  API Gateway
+              - 7556  Discovery Service
+              - 7552  API Catalog
+              - 7553  Metrics Service
+              - 8544  ZSS
+
+            PASS  : Port is not in LISTEN state
+            WARN  : Port is in use — investigate before upgrading
+
+            Note: If Zowe is currently running, its own ports will appear
+            in use. Stop Zowe before running this check if you want clean
+            results, or review the owning address space names in the output.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== Zowe Port Availability Check ==="
+echo "Checking default Zowe V3 ports..."
+echo "------------------------------------"
+RC_TOTAL=0
+for PORT in 7554 7556 7552 7553 8544; do
+  LABEL=""
+  case $PORT in
+    7554) LABEL="API Gateway"       ;;
+    7556) LABEL="Discovery Service" ;;
+    7552) LABEL="API Catalog"       ;;
+    7553) LABEL="Metrics Service"   ;;
+    8544) LABEL="ZSS"               ;;
+  esac
+  IN_USE=$(netstat -an 2>/dev/null | grep "LISTEN" | grep ":${PORT} ")
+  if [ -z "$IN_USE" ]; then
+    echo "PASS      : Port $PORT ($LABEL) - available"
+  else
+    echo "WARN      : Port $PORT ($LABEL) - IN USE:"
+    echo "            $IN_USE"
+    RC_TOTAL=1
+  fi
+done
+echo "------------------------------------"
+if [ $RC_TOTAL -eq 0 ]; then
+  echo "RESULT    : PASS - all Zowe V3 ports available"
+else
+  echo "RESULT    : WARN - port conflict(s) detected - investigate before upgrade"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 11 – Derive readiness summary (setVariable)
+         ============================================================ -->
+
+    <step name="deriveReadiness">
+        <title>Derive Readiness Summary</title>
+        <description>Builds the READINESS_SUMMARY variable from the z/OSMF version and system name captured earlier. This one-line summary surfaces in the z/OSMF variables panel for quick review.</description>
+        <prereqStep name="checkPortAvail"/>
+        <instructions substitution="true">
+            Constructs the readiness summary string from captured values:
+              z/OSMF version : ${instance-ZOSMF_VERSION}
+              z/OS system    : ${instance-ZOSMF_SYSTEM}
+
+            All check steps have completed. Review each step's job output
+            on the JES spool for detailed PASS/WARN/FAIL results before
+            proceeding to the approval gate.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <setVariable name="READINESS_SUMMARY" substitution="true">System=${instance-ZOSMF_SYSTEM} zOSMF=${instance-ZOSMF_VERSION} Checks=JAVA+NODE+ZFS+CERTS+PROCLIB+RACF+PORTS</setVariable>
+    </step>
+
+    <!-- ============================================================
+         Step 12 – Manual approval gate
+         ============================================================ -->
+
+    <step name="approvalGate">
+        <title>Upgrade Readiness Sign-Off</title>
+        <description>Manual checkpoint. The upgrade lead must review all check results and explicitly complete this step to confirm the system is ready for the Zowe V3 upgrade. Completing this step is the formal sign-off.</description>
+        <prereqStep name="deriveReadiness"/>
+        <instructions substitution="true">
+            SIGN-OFF REQUIRED BEFORE UPGRADE
+
+            Review the output of each check step on the JES spool:
+              1. checkJava       - Java 17 or higher installed
+              2. checkNode       - Node.js 18 or higher installed
+              3. checkZfsSpace   - At least 2 GB free on Zowe zFS
+              4. checkKeyring    - Zowe keyring exists with all certs
+              5. checkCertExpiry - No expired or near-expiry certificates
+              6. checkZoweProc   - ZWESISTC and ZWESLSTC in PROCLIB
+              7. checkZoweYaml   - zowe.yaml present and key fields populated
+              8. checkRacfGroups - ZWESIGRP and ZWEADMIN groups exist
+              9. checkPortAvail  - Zowe V3 ports available
+
+            Readiness summary: ${instance-READINESS_SUMMARY}
+
+            Before marking this step Complete confirm that:
+              - All steps above show PASS or acceptable WARN in their output
+              - Any WARN items have been reviewed and accepted or remediated
+              - A change record or upgrade approval has been obtained
+              - A backout plan is in place
+              - The upgrade window has been confirmed with application owners
+
+            Do NOT mark this step Complete if any check showed FAIL.
+            Re-run the affected check steps after remediation.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+    </step>
+
+    <!-- ============================================================
+         Step 13 – Write readiness report (shell-JCL)
+         ============================================================ -->
+
+    <step name="writeReadinessReport">
+        <title>Write Readiness Report</title>
+        <description>Writes the complete Zowe V3 upgrade readiness report to a USS file and prints it to the JES spool STDOUT. The USS file persists after the workflow completes for auditing and ticketing purposes.</description>
+        <prereqStep name="approvalGate"/>
+        <variableValue name="ZOWE_ZFS_MOUNT"  required="true"/>
+        <variableValue name="ZOWE_YAML_PATH"  required="true"/>
+        <variableValue name="ZOWE_PROCLIB"    required="true"/>
+        <variableValue name="KEYRING_OWNER"   required="true"/>
+        <variableValue name="KEYRING_NAME"    required="true"/>
+        <variableValue name="CERT_WARN_DAYS"  required="true"/>
+        <variableValue name="JAVA_HOME"       required="true"/>
+        <variableValue name="NODE_HOME"       required="true"/>
+        <variableValue name="REPORT_USS_PATH" required="true"/>
+        <variableValue name="ZOSMF_VERSION"   required="false"/>
+        <variableValue name="ZOSMF_SYSTEM"    required="false"/>
+        <variableValue name="READINESS_SUMMARY" required="false"/>
+        <instructions substitution="true">
+            Writes the complete readiness report to ${instance-REPORT_USS_PATH}
+            and prints it to STDOUT on the JES spool.
+
+            The report captures all input variables and the readiness summary
+            in a single timestamped document suitable for attaching to a
+            change record or upgrade ticket.
+
+            Retrieve after the workflow with:
+              zowe zos-files view uss-file ${instance-REPORT_USS_PATH}
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>false</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+REPORT="${instance-REPORT_USS_PATH}"
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+APPROVER=$(id 2>/dev/null | cut -d'(' -f2 | cut -d')' -f1)
+
+echo "============================================================"  > "$REPORT"
+echo "  Zowe V3 Upgrade Readiness Report"                           >> "$REPORT"
+echo "  Generated : $TS"                                            >> "$REPORT"
+echo "  System    : ${instance-ZOSMF_SYSTEM}"                      >> "$REPORT"
+echo "  z/OSMF    : ${instance-ZOSMF_VERSION}"                     >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "CONFIGURATION REVIEWED"                                       >> "$REPORT"
+echo "  Zowe zFS mount   : ${instance-ZOWE_ZFS_MOUNT}"             >> "$REPORT"
+echo "  Zowe yaml        : ${instance-ZOWE_YAML_PATH}"             >> "$REPORT"
+echo "  Zowe PROCLIB     : ${instance-ZOWE_PROCLIB}"               >> "$REPORT"
+echo "  Keyring owner    : ${instance-KEYRING_OWNER}"              >> "$REPORT"
+echo "  Keyring name     : ${instance-KEYRING_NAME}"               >> "$REPORT"
+echo "  Cert warn days   : ${instance-CERT_WARN_DAYS}"             >> "$REPORT"
+echo "  Java home        : ${instance-JAVA_HOME}"                  >> "$REPORT"
+echo "  Node home        : ${instance-NODE_HOME}"                  >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "ZOWE V3 REQUIREMENTS"                                         >> "$REPORT"
+echo "  Java         : 17 minimum   - see checkJava step output"   >> "$REPORT"
+echo "  Node.js      : 18 minimum   - see checkNode step output"   >> "$REPORT"
+echo "  zFS space    : 2 GB minimum - see checkZfsSpace output"    >> "$REPORT"
+echo "  Certificates : No expired   - see checkCertExpiry output"  >> "$REPORT"
+echo "  PROCLIB      : ZWESISTC, ZWESLSTC - see checkZoweProc"     >> "$REPORT"
+echo "  RACF groups  : ZWESIGRP, ZWEADMIN - see checkRacfGroups"   >> "$REPORT"
+echo "  Ports        : 7554,7556,7552,7553,8544 - checkPortAvail"  >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "READINESS SUMMARY"                                            >> "$REPORT"
+echo "  ${instance-READINESS_SUMMARY}"                             >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "SIGN-OFF"                                                     >> "$REPORT"
+echo "  Approved by : $APPROVER"                                   >> "$REPORT"
+echo "  Approved at : $TS"                                         >> "$REPORT"
+echo "  Workflow    : zowe-upgrade-readiness v1.0"                 >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo "  Retain this report for change management records."         >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+
+echo "Report written to: $REPORT"
+echo ""
+cat "$REPORT"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
