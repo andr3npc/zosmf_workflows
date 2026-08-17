@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>cert-expiry-notify-csp</workflowID>
+        <workflowDefaultName>Certificate Expiry Notifier – CSP</workflowDefaultName>
+        <workflowDescription>Audits RACF keyring certificate expiry dates and POSTs an alert to a CSP REST endpoint when certificates are expiring or already expired. Uses user/password or OAuth 2.0 bearer token authentication.</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>Custom</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables – customer-facing inputs
+         ============================================================ -->
+
+    <variable name="KEYRING_OWNER" scope="instance" visibility="public">
+        <label>Keyring Owner User ID</label>
+        <abstract>The RACF user ID that owns the keyring to audit</abstract>
+        <description>The RACF user ID associated with the keyring. For the default z/OSMF keyring this is IZUSVR. For a Zowe keyring the default is ZWESIUSR.</description>
+        <category>RACF</category>
+        <string>
+            <validationType>TSOUSERID</validationType>
+            <default>IZUSVR</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_NAME" scope="instance" visibility="public">
+        <label>Keyring Name</label>
+        <abstract>The name of the RACF keyring to audit</abstract>
+        <description>The keyring label associated with KEYRING_OWNER. Example: IZUKeyring.IZUDFLT</description>
+        <category>RACF</category>
+        <string>
+            <default>IZUKeyring.IZUDFLT</default>
+        </string>
+    </variable>
+
+    <variable name="WARN_DAYS" scope="instance" visibility="public">
+        <label>Warning Threshold (days)</label>
+        <abstract>Flag any certificate expiring within this many days</abstract>
+        <description>Certificates expiring within this many days are reported as WARNING. Certificates already past their expiry date are always reported as EXPIRED. Set to 0 to report expiry dates only without a warning threshold.</description>
+        <category>RACF</category>
+        <integer>
+            <default>60</default>
+        </integer>
+    </variable>
+
+    <variable name="REXX_DATASET" scope="instance" visibility="public">
+        <label>REXX EXEC Library</label>
+        <abstract>PDS containing the KEYRGAUD member used by the expiry audit step</abstract>
+        <description>The partitioned dataset (PDS or PDSE) that contains the KEYRGAUD REXX exec. The exec is called by the auditExpiry step via IKJEFT01. Example: ANDRE.REXX.EXEC</description>
+        <category>RACF</category>
+        <string>
+            <validationType>DSNAME</validationType>
+            <default>ANDRE.REXX.EXEC</default>
+        </string>
+    </variable>
+
+    <variable name="STAGE_DATASET" scope="instance" visibility="public">
+        <label>Staging Dataset</label>
+        <abstract>Pre-allocated sequential dataset used to stage the audit report between steps</abstract>
+        <description>A pre-allocated sequential dataset (LRECL=132, RECFM=FB or VB) used to hold the audit report so the notifyCSP step can read it and build the alert payload. Must exist and be catalogued before the workflow runs. Example: ANDRE.CERT.REPORT</description>
+        <category>RACF</category>
+        <string>
+            <validationType>DSNAME</validationType>
+            <default>ANDRE.CERT.REPORT</default>
+        </string>
+    </variable>
+
+    <variable name="CSP_ENDPOINT" scope="instance" visibility="public">
+        <label>CSP REST Endpoint URL</label>
+        <abstract>Full URL of the CSP REST API endpoint that accepts alert events</abstract>
+        <description>The complete HTTPS URL of the CSP event ingest endpoint. Example: https://csp.example.com/api/v1/events  Only HTTPS is recommended for production use.</description>
+        <category>CSP</category>
+        <string>
+            <default>https://csp.example.com/api/v1/events</default>
+        </string>
+    </variable>
+
+    <variable name="CSP_AUTH_TYPE" scope="instance" visibility="public">
+        <label>CSP Authentication Type</label>
+        <abstract>Authentication scheme used when calling the CSP REST API (BASIC or BEARER)</abstract>
+        <description>Set to BASIC to use HTTP Basic Authentication (user/password). Set to BEARER to supply an OAuth 2.0 bearer token via CSP_TOKEN. The chosen scheme controls which Authorization header is built by the notifyCSP step.</description>
+        <category>CSP</category>
+        <string>
+            <default>BASIC</default>
+        </string>
+    </variable>
+
+    <variable name="CSP_USER" scope="instance" visibility="public">
+        <label>CSP User ID (Basic Auth)</label>
+        <abstract>CSP user ID used when CSP_AUTH_TYPE is BASIC</abstract>
+        <description>The CSP service account user ID used for HTTP Basic Authentication. Ignored when CSP_AUTH_TYPE is BEARER.</description>
+        <category>CSP</category>
+        <string/>
+    </variable>
+
+    <variable name="CSP_PASSWORD" scope="instance" visibility="private">
+        <label>CSP Password (Basic Auth)</label>
+        <abstract>CSP password used when CSP_AUTH_TYPE is BASIC</abstract>
+        <description>The CSP service account password. Stored as a private variable so it is masked in the z/OSMF UI. Ignored when CSP_AUTH_TYPE is BEARER.</description>
+        <category>CSP</category>
+        <string/>
+    </variable>
+
+    <variable name="CSP_TOKEN" scope="instance" visibility="private">
+        <label>CSP OAuth 2.0 Bearer Token</label>
+        <abstract>Bearer token used when CSP_AUTH_TYPE is BEARER</abstract>
+        <description>The OAuth 2.0 access token for CSP API calls. Stored as a private variable so it is masked in the z/OSMF UI. Ignored when CSP_AUTH_TYPE is BASIC.</description>
+        <category>CSP</category>
+        <string/>
+    </variable>
+
+    <variable name="SYSTEM_NAME" scope="instance" visibility="public">
+        <label>System Name</label>
+        <abstract>z/OS system name to include in the alert payload (e.g. SY1)</abstract>
+        <description>The MVS system name or SMFID of this z/OS image. Included in the CSP alert payload so the receiving team can identify which system raised the alert. Example: SY1 or PROD1</description>
+        <category>CSP</category>
+        <string>
+            <default>SY1</default>
+        </string>
+    </variable>
+
+    <!-- Internal variables written by the shell step and consumed by the REST step -->
+
+    <variable name="AUDIT_VERDICT" scope="instance" visibility="public">
+        <label>Audit Verdict</label>
+        <abstract>CLEAN, WARNING, or EXPIRED – set by the evaluateAudit step</abstract>
+        <description>The overall verdict of the certificate expiry audit. CLEAN means no certificates are expiring or expired. WARNING means at least one certificate will expire within WARN_DAYS days. EXPIRED means at least one certificate has already passed its expiry date.</description>
+        <category>Internal</category>
+        <string/>
+    </variable>
+
+    <variable name="ALERT_PAYLOAD" scope="instance" visibility="public">
+        <label>CSP Alert JSON Payload</label>
+        <abstract>JSON body to be POSTed to the CSP event endpoint</abstract>
+        <description>The JSON payload assembled by the evaluateAudit step and consumed by the notifyCSP rest step. Contains the alert severity, system name, keyring details, and the first expiring certificate found.</description>
+        <category>Internal</category>
+        <string/>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Run the RACF keyring expiry audit and stage output
+         ============================================================ -->
+
+    <step name="auditExpiry">
+        <title>Audit Certificate Expiry Dates</title>
+        <description>Runs the KEYRGAUD REXX exec via IKJEFT01 to enumerate every certificate in the target keyring and flag those expiring within WARN_DAYS days. Output is routed to STAGE_DATASET for use by subsequent steps.</description>
+        <variableValue name="KEYRING_OWNER"  required="true"/>
+        <variableValue name="KEYRING_NAME"   required="true"/>
+        <variableValue name="WARN_DAYS"      required="true"/>
+        <variableValue name="REXX_DATASET"   required="true"/>
+        <variableValue name="STAGE_DATASET"  required="true"/>
+        <instructions substitution="true">
+            Audits every certificate connected to keyring ${instance-KEYRING_NAME}
+            owned by ${instance-KEYRING_OWNER}, flagging certificates that expire
+            within ${instance-WARN_DAYS} days.
+
+            The report is written to ${instance-STAGE_DATASET} for downstream
+            processing. The dataset must already exist and be catalogued.
+
+            Pre-requisites:
+              - KEYRGAUD must be installed in ${instance-REXX_DATASET}(KEYRGAUD).
+              - ${instance-STAGE_DATASET} must be pre-allocated (LRECL>=132).
+        </instructions>
+        <weight>10</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true"><![CDATA[
+//KAUDIT   EXEC PGM=IKJEFT01,DYNAMNBR=36,REGION=0M
+//SYSTSPRT DD DSN=]]>${instance-STAGE_DATASET}<![CDATA[,DISP=SHR
+//SYSPRINT DD SYSOUT=*
+//SYSTSIN  DD *
+ EX ']]>${instance-REXX_DATASET}<![CDATA[(KEYRGAUD)' ']]>${instance-KEYRING_OWNER} ${instance-KEYRING_NAME} ${instance-WARN_DAYS}<![CDATA[' EXEC
+/*
+]]></inlineTemplate>
+            <submitAs>JCL</submitAs>
+            <maxLrecl>80</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Parse audit output and build the CSP JSON payload
+         ============================================================ -->
+
+    <step name="evaluateAudit">
+        <title>Evaluate Audit and Build Alert Payload</title>
+        <description>Reads the staged audit report, determines the overall verdict (CLEAN / WARNING / EXPIRED), and assembles the JSON payload that will be POSTed to CSP. Sets AUDIT_VERDICT and ALERT_PAYLOAD.</description>
+        <prereqStep name="auditExpiry"/>
+        <variableValue name="STAGE_DATASET"  required="true"/>
+        <variableValue name="SYSTEM_NAME"    required="true"/>
+        <variableValue name="KEYRING_OWNER"  required="true"/>
+        <variableValue name="KEYRING_NAME"   required="true"/>
+        <variableValue name="WARN_DAYS"      required="true"/>
+        <instructions substitution="true">
+            Reads ${instance-STAGE_DATASET}, scans for EXPIRED and WARNING lines,
+            derives AUDIT_VERDICT, and writes the JSON alert payload to
+            /tmp/csp_payload_${instance-SYSTEM_NAME}.json for the notifyCSP step.
+
+            If AUDIT_VERDICT is CLEAN the notifyCSP and logResult steps still run
+            but the CSP call records severity INFO rather than WARNING or CRITICAL.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+# -------------------------------------------------------------------
+# evaluateAudit – parse the KEYRGAUD report and build the CSP payload
+# -------------------------------------------------------------------
+REPORT_DS="${instance-STAGE_DATASET}"
+SYSTEM="${instance-SYSTEM_NAME}"
+OWNER="${instance-KEYRING_OWNER}"
+RING="${instance-KEYRING_NAME}"
+WARN_DAYS="${instance-WARN_DAYS}"
+PAYLOAD_FILE="/tmp/csp_payload_${SYSTEM}.json"
+
+# Read the staged report from the MVS dataset via //'DSN'
+REPORT=$(cat "//'${REPORT_DS}'" 2>/dev/null)
+if [ $? -ne 0 ]; then
+  echo "ERROR: cannot read staging dataset //'${REPORT_DS}'"
+  exit 1
+fi
+
+# Count EXPIRED and WARNING lines
+EXPIRED_COUNT=$(echo "$REPORT" | grep -c "EXPIRED" || true)
+WARN_COUNT=$(echo "$REPORT"   | grep -c "WARNING"  || true)
+
+# Derive overall verdict
+if [ "$EXPIRED_COUNT" -gt 0 ]; then
+  VERDICT="EXPIRED"
+  SEVERITY="critical"
+elif [ "$WARN_COUNT" -gt 0 ]; then
+  VERDICT="WARNING"
+  SEVERITY="warning"
+else
+  VERDICT="CLEAN"
+  SEVERITY="info"
+fi
+
+echo "AUDIT_VERDICT=${VERDICT}  (EXPIRED=${EXPIRED_COUNT}  WARNING=${WARN_COUNT})"
+
+# Extract first flagged certificate label for the payload summary
+FIRST_CERT=$(echo "$REPORT" | grep -m1 -E "EXPIRED|WARNING" | sed 's/  */ /g' | cut -c1-120 || true)
+if [ -z "$FIRST_CERT" ]; then
+  FIRST_CERT="No expiring certificates detected."
+fi
+
+# Escape double-quotes in FIRST_CERT for JSON safety
+FIRST_CERT_ESCAPED=$(echo "$FIRST_CERT" | sed 's/"/\\"/g')
+
+# Build timestamp (USS date in ISO-8601 form)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+
+# Write JSON payload
+cat > "${PAYLOAD_FILE}" << ENDJSON
+{
+  "source": "z/OS-${SYSTEM}",
+  "event_type": "certificate_expiry_audit",
+  "severity": "${SEVERITY}",
+  "timestamp": "${TIMESTAMP}",
+  "keyring_owner": "${OWNER}",
+  "keyring_name": "${RING}",
+  "warn_threshold_days": ${WARN_DAYS},
+  "expired_count": ${EXPIRED_COUNT},
+  "warning_count": ${WARN_COUNT},
+  "verdict": "${VERDICT}",
+  "first_flagged_cert": "${FIRST_CERT_ESCAPED}"
+}
+ENDJSON
+
+echo "Payload written to ${PAYLOAD_FILE}"
+cat "${PAYLOAD_FILE}"
+
+# Surface verdict as a parseable token for setVariable
+echo "__VERDICT__${VERDICT}__"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – POST the alert to the CSP REST endpoint
+         ============================================================ -->
+
+    <step name="notifyCSP">
+        <title>POST Alert to CSP</title>
+        <description>Sends the JSON alert payload assembled by evaluateAudit to the CSP REST endpoint using curl. Supports HTTP Basic Authentication (CSP_AUTH_TYPE=BASIC) or OAuth 2.0 Bearer token (CSP_AUTH_TYPE=BEARER). The step fails if CSP returns a non-2xx HTTP status code.</description>
+        <prereqStep name="evaluateAudit"/>
+        <variableValue name="CSP_ENDPOINT"  required="true"/>
+        <variableValue name="CSP_AUTH_TYPE" required="true"/>
+        <variableValue name="CSP_USER"      required="false"/>
+        <variableValue name="CSP_PASSWORD"  required="false"/>
+        <variableValue name="CSP_TOKEN"     required="false"/>
+        <variableValue name="SYSTEM_NAME"   required="true"/>
+        <instructions substitution="true">
+            POSTs the alert JSON to ${instance-CSP_ENDPOINT} using
+            ${instance-CSP_AUTH_TYPE} authentication.
+
+            - BASIC: supply CSP_USER and CSP_PASSWORD.
+            - BEARER: supply CSP_TOKEN (OAuth 2.0 access token).
+
+            A CSP response code outside 200–299 causes this step to fail.
+            The HTTP response body is printed to SYSOUT for diagnostics.
+
+            Note: curl must be available in the USS PATH on this system.
+            On z/OS 2.4+ curl ships with z/OS Open Tools or IBM Ported Tools.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+# -------------------------------------------------------------------
+# notifyCSP – POST the alert payload to the CSP REST endpoint
+# -------------------------------------------------------------------
+ENDPOINT="${instance-CSP_ENDPOINT}"
+AUTH_TYPE="${instance-CSP_AUTH_TYPE}"
+CSP_USER="${instance-CSP_USER}"
+CSP_PASSWORD="${instance-CSP_PASSWORD}"
+CSP_TOKEN="${instance-CSP_TOKEN}"
+SYSTEM="${instance-SYSTEM_NAME}"
+PAYLOAD_FILE="/tmp/csp_payload_${SYSTEM}.json"
+
+if [ ! -f "${PAYLOAD_FILE}" ]; then
+  echo "ERROR: payload file ${PAYLOAD_FILE} not found – did evaluateAudit complete?"
+  exit 1
+fi
+
+echo "Sending alert to CSP endpoint: ${ENDPOINT}"
+echo "Auth type: ${AUTH_TYPE}"
+echo "Payload:"
+cat "${PAYLOAD_FILE}"
+echo ""
+
+# Build the curl auth flag based on authentication type
+if [ "${AUTH_TYPE}" = "BEARER" ]; then
+  AUTH_FLAG="-H \"Authorization: Bearer ${CSP_TOKEN}\""
+else
+  # Default: BASIC
+  AUTH_FLAG="-u \"${CSP_USER}:${CSP_PASSWORD}\""
+fi
+
+# POST to CSP – capture HTTP status code
+HTTP_STATUS=$(eval curl -s -o /tmp/csp_response_${SYSTEM}.txt -w "%{http_code}" \
+  -X POST "${ENDPOINT}" \
+  -H "Content-Type: application/json" \
+  ${AUTH_FLAG} \
+  --data-binary "@${PAYLOAD_FILE}" \
+  --max-time 30 \
+  --retry 2 \
+  --retry-delay 5 \
+  --insecure 2>&1)
+
+CURL_RC=$?
+echo "curl exit code   : ${CURL_RC}"
+echo "CSP HTTP status  : ${HTTP_STATUS}"
+echo "CSP response body:"
+cat /tmp/csp_response_${SYSTEM}.txt 2>/dev/null || echo "(empty)"
+echo ""
+
+if [ ${CURL_RC} -ne 0 ]; then
+  echo "ERROR: curl failed with exit code ${CURL_RC}"
+  exit 1
+fi
+
+# Accept any 2xx status code as success
+STATUS_CLASS=$(echo "${HTTP_STATUS}" | cut -c1-1)
+if [ "${STATUS_CLASS}" != "2" ]; then
+  echo "ERROR: CSP returned HTTP ${HTTP_STATUS} – expected 2xx"
+  exit 1
+fi
+
+echo "SUCCESS: Alert delivered to CSP (HTTP ${HTTP_STATUS})"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – Log the result
+         ============================================================ -->
+
+    <step name="logResult">
+        <title>Log Notification Result</title>
+        <description>Prints a final summary to SYSOUT confirming the audit verdict and the CSP notification outcome. This step always runs regardless of verdict so there is always a visible audit trail in JES.</description>
+        <prereqStep name="notifyCSP"/>
+        <variableValue name="AUDIT_VERDICT" required="false"/>
+        <variableValue name="SYSTEM_NAME"   required="true"/>
+        <variableValue name="KEYRING_OWNER" required="true"/>
+        <variableValue name="KEYRING_NAME"  required="true"/>
+        <variableValue name="CSP_ENDPOINT"  required="true"/>
+        <instructions substitution="true">
+            Prints a final audit trail entry confirming:
+              - System: ${instance-SYSTEM_NAME}
+              - Keyring: ${instance-KEYRING_NAME} (owner: ${instance-KEYRING_OWNER})
+              - Verdict: ${instance-AUDIT_VERDICT}
+              - CSP endpoint: ${instance-CSP_ENDPOINT}
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+echo "========================================================"
+echo "  Certificate Expiry CSP Notification – Result Summary"
+echo "========================================================"
+echo "  System          : ${instance-SYSTEM_NAME}"
+echo "  Keyring owner   : ${instance-KEYRING_OWNER}"
+echo "  Keyring name    : ${instance-KEYRING_NAME}"
+echo "  Verdict         : ${instance-AUDIT_VERDICT}"
+echo "  CSP endpoint    : ${instance-CSP_ENDPOINT}"
+echo "  Timestamp       : $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+echo "========================================================"
+echo "  Workflow complete."
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
