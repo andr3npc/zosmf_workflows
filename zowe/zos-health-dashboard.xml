@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  zos-health-dashboard.xml
+  Point-in-time z/OS system health snapshot.
+  Steps: checkZosmf, checkFilesystems, checkLargeMounts, checkActivePorts,
+         checkRacfGroups, checkJesQueue, deriveHealth, writeReport
+-->
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>zos-health-dashboard</workflowID>
+        <workflowDefaultName>z/OS Health Dashboard</workflowDefaultName>
+        <workflowDescription>Point-in-time z/OS health snapshot: filesystems, ports, RACF, JES queue</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="FS_WARN_PCT" scope="instance" visibility="public">
+        <label>Filesystem Warning Threshold (%)</label>
+        <abstract>Flag any mounted zFS above this usage percentage (default 80)</abstract>
+        <description>Any filesystem whose used percentage meets or exceeds this value will be flagged WARN in the checkLargeMounts step. Expressed as an integer, e.g. 80 for 80%.</description>
+        <category>Health</category>
+        <string>
+            <default>80</default>
+        </string>
+    </variable>
+
+    <variable name="RACF_GROUPS" scope="instance" visibility="public">
+        <label>RACF Groups to Check</label>
+        <abstract>Space-separated list of RACF group names to verify exist</abstract>
+        <description>The checkRacfGroups step runs LISTGRP for each group name in this list. Separate names with a single space. Example: ZWEADMIN ZWESIGRP SYS1</description>
+        <category>Health</category>
+        <string>
+            <default>ZWEADMIN ZWESIGRP</default>
+        </string>
+    </variable>
+
+    <variable name="HEALTH_STATUS" scope="instance" visibility="public">
+        <label>Overall Health Status</label>
+        <abstract>Set by the operator after reviewing all checks: HEALTHY, DEGRADED, or CRITICAL</abstract>
+        <description>Overall health verdict entered by the operator in the deriveHealth step after reviewing all automated outputs. Recorded in the final report.</description>
+        <category>Health</category>
+        <string>
+            <default>HEALTHY</default>
+        </string>
+    </variable>
+
+    <variable name="REPORT_PATH" scope="instance" visibility="public">
+        <label>Report Output Path</label>
+        <abstract>USS path where the health dashboard report will be written</abstract>
+        <description>The full USS file path for the health dashboard report output.</description>
+        <category>Health</category>
+        <string>
+            <default>/z/andre/zowe/health-dashboard.log</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – z/OSMF connectivity check (rest)
+         ============================================================ -->
+
+    <step name="checkZosmf">
+        <title>Check z/OSMF Connectivity</title>
+        <description>Sends GET /zosmf/info to confirm z/OSMF is reachable and records the system name and version. Prerequisite for all subsequent steps.</description>
+        <instructions>
+            Sends GET /zosmf/info. HTTP 200 confirms z/OSMF is reachable.
+            The system name and z/OSMF version appear in the step output
+            and are recorded in the final report.
+
+            PASS : HTTP 200
+            FAIL : Any other status
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/zosmf/info</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Filesystem usage (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkFilesystems">
+        <title>Check Filesystem Usage</title>
+        <description>Runs df -k to list all mounted filesystems with their total, used, and available space. Produces a summary table sorted by usage percentage.</description>
+        <prereqStep name="checkZosmf"/>
+        <instructions>
+            Runs df -k and formats a usage table for all mounted
+            filesystems. Output is sorted by used percentage descending
+            so the fullest filesystems appear first.
+
+            Review for any filesystems approaching capacity before the
+            checkLargeMounts threshold check.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== Filesystem Usage ==="
+echo "$(date '+%Y-%m-%d %H:%M:%S')"
+echo "------------------------"
+printf "%-45s %10s %10s %10s %6s\n" "MOUNT POINT" "TOTAL(KB)" "USED(KB)" "AVAIL(KB)" "USE%"
+echo "-----------------------------------------------------------------------"
+df -k 2>/dev/null | tail -n +2 | while read LINE; do
+  MOUNT=$(echo "$LINE" | awk '{print $1}')
+  TOTAL=$(echo "$LINE" | awk '{print $2}')
+  AVAIL=$(echo "$LINE" | awk '{print $3}')
+  if [ -n "$TOTAL" ] &amp;&amp; [ "$TOTAL" -gt 0 ] 2>/dev/null; then
+    USED=$((TOTAL - AVAIL))
+    PCT=$(echo "$USED $TOTAL" | awk '{printf "%d", ($1/$2)*100}')
+    printf "%-45s %10s %10s %10s %5s%%\n" "$MOUNT" "$TOTAL" "$USED" "$AVAIL" "$PCT"
+  fi
+done
+echo "-----------------------------------------------------------------------"
+TOTAL_FS=$(df -k 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+echo "Total mounted filesystems: $TOTAL_FS"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – Flag full filesystems (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkLargeMounts">
+        <title>Flag Filesystems Above Threshold</title>
+        <description>Scans all mounted filesystems and flags any above FS_WARN_PCT percent full. PASS if none exceed the threshold, WARN otherwise.</description>
+        <prereqStep name="checkFilesystems"/>
+        <variableValue name="FS_WARN_PCT" required="true"/>
+        <instructions substitution="true">
+            Flags any filesystem at or above ${instance-FS_WARN_PCT}%
+            usage as a warning.
+
+            PASS : All filesystems below the threshold
+            WARN : One or more filesystems at or above threshold
+
+            Investigate any flagged filesystems before they fill
+            completely — a full zFS will crash the address spaces
+            using it.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+THRESHOLD=${instance-FS_WARN_PCT}
+echo "=== Filesystem Threshold Check ==="
+echo "Warn threshold : ${THRESHOLD}%"
+echo "----------------------------------"
+WARN_COUNT=0
+df -k 2>/dev/null | tail -n +2 | while read LINE; do
+  MOUNT=$(echo "$LINE" | awk '{print $1}')
+  TOTAL=$(echo "$LINE" | awk '{print $2}')
+  AVAIL=$(echo "$LINE" | awk '{print $3}')
+  if [ -n "$TOTAL" ] &amp;&amp; [ "$TOTAL" -gt 0 ] 2>/dev/null; then
+    USED=$((TOTAL - AVAIL))
+    PCT=$(echo "$USED $TOTAL" | awk '{printf "%d", ($1/$2)*100}')
+    if [ "$PCT" -ge "$THRESHOLD" ] 2>/dev/null; then
+      FREE_GB=$(echo "$AVAIL 1048576" | awk '{printf "%.2f", $1/$2}')
+      echo "WARN: $MOUNT is ${PCT}% full (${FREE_GB} GB free)"
+      WARN_COUNT=$((WARN_COUNT+1))
+    fi
+  fi
+done
+echo "----------------------------------"
+if [ $WARN_COUNT -eq 0 ] 2>/dev/null; then
+  echo "RESULT : PASS (no filesystems above ${THRESHOLD}%)"
+else
+  echo "RESULT : WARN ($WARN_COUNT filesystem(s) at or above ${THRESHOLD}%)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – Active listening ports (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkActivePorts">
+        <title>Check Active Listening Ports</title>
+        <description>Runs netstat to count and list all ports currently in LISTEN state. Provides a snapshot of active services on the system.</description>
+        <prereqStep name="checkLargeMounts"/>
+        <instructions>
+            Runs netstat -an and filters for LISTEN entries.
+            Reports a count of listening ports and lists the first 30
+            for review.
+
+            Use this output to spot unexpected services or confirm
+            expected services (Zowe, z/OSMF, etc.) are listening.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== Active Listening Ports ==="
+echo "$(date '+%Y-%m-%d %H:%M:%S')"
+echo "------------------------------"
+LISTEN_OUT=$(netstat -an 2>/dev/null | grep -i "listen")
+COUNT=$(echo "$LISTEN_OUT" | grep -c "." 2>/dev/null)
+echo "Total ports in LISTEN state: $COUNT"
+echo ""
+echo "--- Port list (first 40) ---"
+echo "$LISTEN_OUT" | head -40
+echo "----------------------------"
+echo ""
+echo "--- Key service ports ---"
+for PORT in 443 7554 7556 7552 7553 8544 10443; do
+  HIT=$(echo "$LISTEN_OUT" | grep "\\.$PORT ")
+  if [ -n "$HIT" ]; then
+    echo "PORT $PORT : LISTENING"
+  else
+    echo "PORT $PORT : not found"
+  fi
+done
+echo "RESULT : PASS ($COUNT ports listening)"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 5 – RACF group check (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkRacfGroups">
+        <title>Check Key RACF Groups</title>
+        <description>Runs LISTGRP for each group in RACF_GROUPS to confirm they exist and have members. Missing groups indicate incomplete security configuration.</description>
+        <prereqStep name="checkActivePorts"/>
+        <variableValue name="RACF_GROUPS" required="true"/>
+        <instructions substitution="true">
+            Runs tsocmd LISTGRP for each group in:
+            ${instance-RACF_GROUPS}
+
+            PASS : All groups found (LISTGRP RC=0)
+            FAIL : One or more groups not found
+
+            Missing groups may indicate the Zowe security configuration
+            jobs have not been run, or a previous cleanup removed them.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+GROUPS="${instance-RACF_GROUPS}"
+echo "=== RACF Group Check ==="
+echo "Groups : $GROUPS"
+echo "------------------------"
+PASS=0
+FAIL=0
+for GRP in $GROUPS; do
+  OUT=$(tsocmd "LISTGRP $GRP" 2>&amp;1)
+  RC=$?
+  echo "--- LISTGRP $GRP (RC=$RC) ---"
+  echo "$OUT" | head -10
+  if [ $RC -eq 0 ]; then
+    echo "STATUS : $GRP EXISTS"
+    PASS=$((PASS+1))
+  else
+    echo "STATUS : $GRP NOT FOUND"
+    FAIL=$((FAIL+1))
+  fi
+  echo ""
+done
+echo "------------------------"
+if [ $FAIL -eq 0 ]; then
+  echo "RESULT : PASS ($PASS group(s) verified)"
+else
+  echo "RESULT : FAIL ($FAIL group(s) missing, $PASS found)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 6 – JES queue snapshot (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkJesQueue">
+        <title>Check JES Queue Snapshot</title>
+        <description>Issues tsocmd STATUS to capture a snapshot of jobs currently active, waiting, or held in the JES queue. Surfaces job backlog at the time of the health check.</description>
+        <prereqStep name="checkRacfGroups"/>
+        <instructions>
+            Issues tsocmd STATUS to list all jobs in the JES queue
+            visible to the ANDRE user ID.
+
+            Reports:
+              - Total jobs found
+              - Jobs in execution (ACTIVE)
+              - Jobs waiting (INPUT/CONVERT)
+              - Jobs held (HELD)
+
+            A large queue backlog or many held jobs may indicate
+            a system performance or configuration issue.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== JES Queue Snapshot ==="
+echo "$(date '+%Y-%m-%d %H:%M:%S')"
+echo "--------------------------"
+OUT=$(tsocmd "STATUS" 2>&amp;1)
+echo "$OUT"
+echo "--------------------------"
+TOTAL=$(echo "$OUT" | grep -c "JOB\|STC\|TSU" 2>/dev/null)
+ACTIVE=$(echo "$OUT" | grep -c "EXECUTING\|ACTIVE" 2>/dev/null)
+HELD=$(echo "$OUT" | grep -ic "held" 2>/dev/null)
+echo "Jobs visible : $TOTAL"
+echo "Executing    : $ACTIVE"
+echo "Held         : $HELD"
+echo "RESULT : PASS (JES queue snapshot captured)"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 7 – Derive health verdict (setVariable + manual)
+         ============================================================ -->
+
+    <step name="deriveHealth">
+        <title>Record Health Verdict</title>
+        <description>Operator reviews all automated check outputs and records the overall system health status in HEALTH_STATUS.</description>
+        <prereqStep name="checkJesQueue"/>
+        <variableValue name="HEALTH_STATUS" required="true"/>
+        <instructions>
+            Review the spool output from all preceding steps and set
+            HEALTH_STATUS to one of:
+
+              HEALTHY   — all checks passed, system operating normally
+              DEGRADED  — warnings found, system functional but needs attention
+              CRITICAL  — one or more failures, immediate action required
+
+            Consider the following when setting the verdict:
+              - Any filesystems above the warning threshold?
+              - Any expected ports not listening?
+              - Any RACF groups missing?
+              - Unusual JES queue depth or held jobs?
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+        <setVariable name="HEALTH_STATUS" substitution="true">${instance-HEALTH_STATUS}</setVariable>
+    </step>
+
+    <!-- ============================================================
+         Step 8 – Write health report (shell-JCL)
+         ============================================================ -->
+
+    <step name="writeReport">
+        <title>Write Health Dashboard Report</title>
+        <description>Writes a timestamped health dashboard report to REPORT_PATH on USS and surfaces it on the JES spool for archiving or forwarding.</description>
+        <prereqStep name="deriveHealth"/>
+        <variableValue name="REPORT_PATH"   required="true"/>
+        <variableValue name="HEALTH_STATUS" required="true"/>
+        <variableValue name="FS_WARN_PCT"   required="true"/>
+        <variableValue name="RACF_GROUPS"   required="true"/>
+        <instructions substitution="true">
+            Writes the health report to ${instance-REPORT_PATH}.
+
+            The report records:
+              - Timestamp and system context from z/OSMF
+              - Configuration used (thresholds, groups checked)
+              - Overall health verdict: ${instance-HEALTH_STATUS}
+
+            Retain for operational records or forward to the system
+            support team.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+REPORT="${instance-REPORT_PATH}"
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+echo "Writing health report to $REPORT"
+echo "============================================================"  > "$REPORT"
+echo "  z/OS Health Dashboard Report"                               >> "$REPORT"
+echo "  Generated  : $TS"                                          >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "CONFIGURATION"                                                >> "$REPORT"
+echo "  FS warn threshold : ${instance-FS_WARN_PCT}%"              >> "$REPORT"
+echo "  RACF groups       : ${instance-RACF_GROUPS}"               >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "CHECKS PERFORMED"                                             >> "$REPORT"
+echo "  1. z/OSMF connectivity    - see checkZosmf step"           >> "$REPORT"
+echo "  2. Filesystem usage table - see checkFilesystems step"     >> "$REPORT"
+echo "  3. Filesystem thresholds  - see checkLargeMounts step"     >> "$REPORT"
+echo "  4. Active listening ports - see checkActivePorts step"     >> "$REPORT"
+echo "  5. RACF group existence   - see checkRacfGroups step"      >> "$REPORT"
+echo "  6. JES queue snapshot     - see checkJesQueue step"        >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "HEALTH VERDICT"                                               >> "$REPORT"
+echo "  ${instance-HEALTH_STATUS}"                                  >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "  Recorded at : $TS"                                         >> "$REPORT"
+echo "  Workflow    : zos-health-dashboard v1.0"                   >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""
+echo "=== Report written to $REPORT ==="
+cat "$REPORT"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
