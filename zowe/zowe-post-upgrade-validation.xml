@@ -1,0 +1,702 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  zowe-post-upgrade-validation.xml
+  Confirms a Zowe V3 upgrade succeeded.
+  Steps: probeGateway, probeDiscovery, probeCatalog, probeZoweAuth,
+         checkVersion, checkZfsMounted, checkSTCsRunning, checkKeyring,
+         checkLogErrors, checkPortsLive, deriveStatus, approvalGate,
+         writeReport
+-->
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>zowe-post-upgrade-validation</workflowID>
+        <workflowDefaultName>Zowe Post-Upgrade Validation</workflowDefaultName>
+        <workflowDescription>Post-upgrade validation for Zowe V3: services, STCs, version, keyring</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="ZOWE_VERSION_EXPECTED" scope="instance" visibility="public">
+        <label>Expected Zowe Version</label>
+        <abstract>Version string to match in zowe.yaml (e.g. 3.0.0)</abstract>
+        <description>The Zowe version string that should appear in zowe.yaml after the upgrade. Used by the checkVersion step to confirm the correct version was installed.</description>
+        <category>Zowe</category>
+        <string>
+            <default>3.0.0</default>
+        </string>
+    </variable>
+
+    <variable name="ZOWE_YAML_PATH" scope="instance" visibility="public">
+        <label>Zowe YAML Path</label>
+        <abstract>Full USS path to the zowe.yaml configuration file</abstract>
+        <description>The USS path to the zowe.yaml file for this Zowe instance. Used by checkVersion and writeReport.</description>
+        <category>Zowe</category>
+        <string>
+            <default>/z/zowe/zowe.yaml</default>
+        </string>
+    </variable>
+
+    <variable name="ZOWE_ZFS_MOUNT" scope="instance" visibility="public">
+        <label>Zowe zFS Mount Point</label>
+        <abstract>USS mount point for the Zowe runtime zFS (e.g. /usr/lpp/zowe)</abstract>
+        <description>The USS path where the Zowe runtime zFS is mounted. Used by checkZfsMounted to confirm the filesystem is still mounted after the upgrade.</description>
+        <category>Zowe</category>
+        <string>
+            <default>/usr/lpp/zowe</default>
+        </string>
+    </variable>
+
+    <variable name="APIML_HOST" scope="instance" visibility="public">
+        <label>APIML Hostname</label>
+        <abstract>Hostname of the Zowe API Mediation Layer gateway</abstract>
+        <description>The hostname (or IP) of the z/OS system running the Zowe APIML gateway. Used to construct the base URL for REST probes.</description>
+        <category>Zowe</category>
+        <string/>
+    </variable>
+
+    <variable name="APIML_PORT" scope="instance" visibility="public">
+        <label>APIML Gateway Port</label>
+        <abstract>HTTPS port of the Zowe API Gateway (default 7554)</abstract>
+        <description>The HTTPS port on which the Zowe API Gateway listens. Default Zowe V3 value is 7554.</description>
+        <category>Zowe</category>
+        <string>
+            <default>7554</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_OWNER" scope="instance" visibility="public">
+        <label>Keyring Owner</label>
+        <abstract>RACF user ID that owns the Zowe keyring (usually IZUSVR)</abstract>
+        <description>The RACF user ID that owns the Zowe keyring. Used by checkKeyring to run RACDCERT LISTRING.</description>
+        <category>Zowe</category>
+        <string>
+            <default>IZUSVR</default>
+        </string>
+    </variable>
+
+    <variable name="KEYRING_NAME" scope="instance" visibility="public">
+        <label>Keyring Name</label>
+        <abstract>Name of the Zowe RACF keyring (usually ZoweKeyring)</abstract>
+        <description>The name of the RACF keyring used by Zowe. Used by checkKeyring.</description>
+        <category>Zowe</category>
+        <string>
+            <default>ZoweKeyring</default>
+        </string>
+    </variable>
+
+    <variable name="ZOWE_LOG_DIR" scope="instance" visibility="public">
+        <label>Zowe Log Directory</label>
+        <abstract>USS path to the Zowe instance log directory</abstract>
+        <description>The directory where Zowe writes its runtime logs. Used by checkLogErrors to scan for SEVERE or ERROR messages after the upgrade.</description>
+        <category>Zowe</category>
+        <string>
+            <default>/z/zowe/logs</default>
+        </string>
+    </variable>
+
+    <variable name="VALIDATION_SUMMARY" scope="instance" visibility="public">
+        <label>Validation Summary</label>
+        <abstract>Filled by the deriveStatus step. Overall PASS or FAIL verdict.</abstract>
+        <description>Overall validation result set by the operator in the deriveStatus step after reviewing all automated check outputs. Value appears in the final readiness report.</description>
+        <category>Zowe</category>
+        <string>
+            <default>PASS</default>
+        </string>
+    </variable>
+
+    <variable name="APPROVER" scope="instance" visibility="public">
+        <label>Approver User ID</label>
+        <abstract>User ID of the person signing off on the post-upgrade validation</abstract>
+        <description>The TSO user ID of the person completing the validation sign-off. Recorded in the final report for change management purposes.</description>
+        <category>Zowe</category>
+        <string/>
+    </variable>
+
+    <variable name="REPORT_PATH" scope="instance" visibility="public">
+        <label>Report Output Path</label>
+        <abstract>USS path where the validation report will be written</abstract>
+        <description>The full USS file path for the post-upgrade validation report. Defaults to /z/andre/zowe/post-upgrade-validation.log.</description>
+        <category>Zowe</category>
+        <string>
+            <default>/z/andre/zowe/post-upgrade-validation.log</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Probe API Gateway (rest)
+         ============================================================ -->
+
+    <step name="probeGateway">
+        <title>Probe API Gateway</title>
+        <description>Sends GET /gateway/api/v1/version to confirm the Zowe API Gateway is responding after the upgrade. HTTP 200 = PASS.</description>
+        <instructions substitution="true">
+            Sends GET https://${instance-APIML_HOST}:${instance-APIML_PORT}/gateway/api/v1/version
+
+            PASS : HTTP 200 — gateway is up and responding
+            FAIL : Any other HTTP status — gateway not reachable or crashed
+
+            If this step fails, check that ZWESLSTC started task is running
+            and that the gateway port (${instance-APIML_PORT}) is listening.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath substitution="true">/gateway/api/v1/version</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – Probe Discovery Service (rest)
+         ============================================================ -->
+
+    <step name="probeDiscovery">
+        <title>Probe Discovery Service</title>
+        <description>Sends GET /eureka/apps to confirm the Zowe Discovery Service is responding after the upgrade. HTTP 200 = PASS.</description>
+        <prereqStep name="probeGateway"/>
+        <instructions>
+            Sends GET /eureka/apps through the gateway.
+
+            PASS : HTTP 200 — discovery service is up
+            FAIL : Any other status — discovery service not reachable
+
+            If this step fails, check ZWESLSTC logs for Discovery
+            registration errors.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/eureka/apps</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – Probe API Catalog (rest)
+         ============================================================ -->
+
+    <step name="probeCatalog">
+        <title>Probe API Catalog</title>
+        <description>Sends GET /apicatalog/api/v1/containers to confirm the API Catalog is serving tiles after the upgrade. HTTP 200 = PASS.</description>
+        <prereqStep name="probeDiscovery"/>
+        <instructions>
+            Sends GET /apicatalog/api/v1/containers.
+
+            PASS : HTTP 200 — catalog is up and returning tile data
+            FAIL : Any other status — catalog not responding
+
+            An empty tile list (HTTP 200, empty body) is still a PASS
+            for connectivity purposes; review the spool output to confirm
+            expected services are registered.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/apicatalog/api/v1/containers</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – Probe Zowe Auth / JWT endpoint (rest)
+         ============================================================ -->
+
+    <step name="probeZoweAuth">
+        <title>Probe Zowe Auth JWT Endpoint</title>
+        <description>Sends GET /gateway/api/v1/auth/keys/public/jwks.json to confirm the Zowe authentication service is publishing its JWT public key after the upgrade.</description>
+        <prereqStep name="probeCatalog"/>
+        <instructions>
+            Sends GET /gateway/api/v1/auth/keys/public/jwks.json
+
+            PASS : HTTP 200 — auth service is up and serving JWT keys
+            FAIL : Any other status — auth service not responding
+
+            A missing or invalid JWT key will cause all Zowe token-based
+            authentication to fail. This is a critical post-upgrade check.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <rest>
+            <httpMethod>GET</httpMethod>
+            <uriPath>/gateway/api/v1/auth/keys/public/jwks.json</uriPath>
+            <expectedStatusCode>200</expectedStatusCode>
+        </rest>
+    </step>
+
+    <!-- ============================================================
+         Step 5 – Check zowe.yaml version (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkVersion">
+        <title>Check zowe.yaml Version</title>
+        <description>Reads zowe.yaml and confirms the version field matches the expected Zowe V3 version string supplied in ZOWE_VERSION_EXPECTED.</description>
+        <prereqStep name="probeZoweAuth"/>
+        <variableValue name="ZOWE_YAML_PATH"         required="true"/>
+        <variableValue name="ZOWE_VERSION_EXPECTED"  required="true"/>
+        <instructions substitution="true">
+            Greps the v.version or zowe.runtimeDirectory version field in
+            ${instance-ZOWE_YAML_PATH} for the string
+            "${instance-ZOWE_VERSION_EXPECTED}".
+
+            PASS : Version string found in zowe.yaml
+            FAIL : File not found, or version string does not match
+
+            If the version does not match, the wrong Zowe build may have
+            been installed. Compare the FMID applied in SMP/E against the
+            expected version.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+YAML="${instance-ZOWE_YAML_PATH}"
+EXPECTED="${instance-ZOWE_VERSION_EXPECTED}"
+echo "=== zowe.yaml Version Check ==="
+echo "File     : $YAML"
+echo "Expected : $EXPECTED"
+echo "--------------------------------"
+if [ ! -f "$YAML" ]; then
+  echo "RESULT : FAIL (zowe.yaml not found at $YAML)"
+  exit 0
+fi
+echo "--- version-related lines in zowe.yaml ---"
+grep -i "version" "$YAML" 2>/dev/null | grep -v "^#" | head -10
+echo "------------------------------------------"
+if grep -q "$EXPECTED" "$YAML" 2>/dev/null; then
+  echo "RESULT : PASS (version $EXPECTED found in zowe.yaml)"
+else
+  echo "RESULT : FAIL (version $EXPECTED not found in zowe.yaml - check SMP/E apply)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 6 – Check Zowe zFS is mounted (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkZfsMounted">
+        <title>Check Zowe zFS Mount</title>
+        <description>Confirms the Zowe runtime zFS is still mounted at ZOWE_ZFS_MOUNT after the upgrade. A missing mount means Zowe cannot access its runtime files.</description>
+        <prereqStep name="checkVersion"/>
+        <variableValue name="ZOWE_ZFS_MOUNT" required="true"/>
+        <instructions substitution="true">
+            Runs df -k on ${instance-ZOWE_ZFS_MOUNT} to confirm the
+            zFS is mounted and reports free space.
+
+            PASS : Mount point exists and df returns data
+            FAIL : Mount point directory does not exist or is not mounted
+
+            If this fails, check that the Zowe zFS was re-mounted during
+            IPL or in the /etc/rc startup procedure.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+MOUNT="${instance-ZOWE_ZFS_MOUNT}"
+echo "=== Zowe zFS Mount Check ==="
+echo "Mount : $MOUNT"
+echo "----------------------------"
+if [ ! -d "$MOUNT" ]; then
+  echo "RESULT : FAIL (directory $MOUNT does not exist)"
+  exit 0
+fi
+DF_OUT=$(df -k "$MOUNT" 2>/dev/null | tail -1)
+if [ -z "$DF_OUT" ]; then
+  echo "RESULT : FAIL ($MOUNT exists but df returned no data - not mounted?)"
+  exit 0
+fi
+echo "df output : $DF_OUT"
+FREE_KB=$(echo "$DF_OUT" | awk '{print $3}')
+FREE_GB=$(echo "$FREE_KB 1048576" | awk '{printf "%.2f", $1/$2}')
+echo "Free space: ${FREE_GB} GB"
+echo "RESULT : PASS (zFS mounted at $MOUNT, ${FREE_GB} GB free)"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 7 – Check Zowe STCs running (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkSTCsRunning">
+        <title>Check Zowe Started Tasks</title>
+        <description>Uses tsocmd to issue D A,STC to check whether ZWESLSTC, ZWESISTC, and ZWESAUX are active address spaces.</description>
+        <prereqStep name="checkZfsMounted"/>
+        <instructions>
+            Issues D A,ZWESLSTC / D A,ZWESISTC / D A,ZWESAUX via tsocmd.
+
+            PASS : All three STCs appear in the D A output
+            WARN : One or two STCs are running (partial start)
+            FAIL : No Zowe STCs found
+
+            ZWESISTC  = Cross-memory server (required for APF-auth services)
+            ZWESAUX   = Auxiliary address space
+            ZWESLSTC  = Main Zowe server (launcher, APIML, ZSS, etc.)
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== Zowe STC Status Check ==="
+echo "Checking: ZWESLSTC ZWESISTC ZWESAUX"
+echo "-----------------------------"
+FOUND=0
+for STC in ZWESLSTC ZWESISTC ZWESAUX; do
+  OUT=$(tsocmd "D A,$STC" 2>&amp;1)
+  echo "--- D A,$STC ---"
+  echo "$OUT"
+  echo "$OUT" | grep -q "$STC"
+  if [ $? -eq 0 ]; then
+    echo "STATUS : $STC ACTIVE"
+    FOUND=$((FOUND+1))
+  else
+    echo "STATUS : $STC NOT FOUND in D A output"
+  fi
+  echo ""
+done
+echo "-----------------------------"
+if [ $FOUND -eq 3 ]; then
+  echo "RESULT : PASS (all 3 Zowe STCs active)"
+elif [ $FOUND -gt 0 ]; then
+  echo "RESULT : WARN ($FOUND/3 Zowe STCs active - check STC logs)"
+else
+  echo "RESULT : FAIL (no Zowe STCs found - STCs may not have started)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 8 – Check RACF keyring intact (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkKeyring">
+        <title>Check RACF Keyring Intact</title>
+        <description>Runs RACDCERT LISTRING to confirm the Zowe keyring is present and has connected certificates after the upgrade. Certificate rotation during upgrade can leave the keyring empty.</description>
+        <prereqStep name="checkSTCsRunning"/>
+        <variableValue name="KEYRING_OWNER" required="true"/>
+        <variableValue name="KEYRING_NAME"  required="true"/>
+        <instructions substitution="true">
+            Runs RACDCERT ID(${instance-KEYRING_OWNER})
+            LISTRING(${instance-KEYRING_NAME}) via tsocmd.
+
+            PASS : Keyring exists (RC=0) and output lists connected certs
+            FAIL : RACDCERT returns non-zero (keyring missing or empty)
+
+            Review the full RACDCERT output to confirm:
+            - Zowe server certificate is connected
+            - CA certificate is connected
+            - Certificate labels match what zowe.yaml references
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+echo "=== RACF Keyring Integrity Check ==="
+echo "Owner  : ${instance-KEYRING_OWNER}"
+echo "Ring   : ${instance-KEYRING_NAME}"
+echo "------------------------------------"
+tsocmd "RACDCERT ID(${instance-KEYRING_OWNER}) LISTRING(${instance-KEYRING_NAME})" 2>&amp;1
+RC=$?
+if [ $RC -eq 0 ]; then
+  echo "RESULT : PASS (keyring found, RC=0)"
+else
+  echo "RESULT : FAIL (RACDCERT returned RC=$RC - keyring may be missing or empty)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 9 – Check Zowe log for errors (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkLogErrors">
+        <title>Check Zowe Logs for Errors</title>
+        <description>Scans the most recent Zowe log file in ZOWE_LOG_DIR for SEVERE or ERROR level messages. Any errors found are printed to the spool for review.</description>
+        <prereqStep name="checkKeyring"/>
+        <variableValue name="ZOWE_LOG_DIR" required="true"/>
+        <instructions substitution="true">
+            Finds the most recent file in ${instance-ZOWE_LOG_DIR} and
+            greps for SEVERE or ERROR (case-insensitive).
+
+            PASS : No SEVERE or ERROR lines found in the log
+            WARN : ERROR lines found (non-fatal issues)
+            FAIL : SEVERE lines found (critical startup failures)
+
+            Review any errors before declaring the upgrade successful.
+            Common post-upgrade errors: certificate mismatch, missing
+            environment variables, wrong Java version.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+LOG_DIR="${instance-ZOWE_LOG_DIR}"
+echo "=== Zowe Log Error Scan ==="
+echo "Log dir : $LOG_DIR"
+echo "---------------------------"
+if [ ! -d "$LOG_DIR" ]; then
+  echo "RESULT : FAIL (log directory $LOG_DIR not found)"
+  exit 0
+fi
+LATEST=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1)
+if [ -z "$LATEST" ]; then
+  echo "WARN: no .log files found in $LOG_DIR"
+  LATEST=$(ls -t "$LOG_DIR"/* 2>/dev/null | head -1)
+fi
+if [ -z "$LATEST" ]; then
+  echo "RESULT : FAIL (no log files found in $LOG_DIR)"
+  exit 0
+fi
+echo "Scanning : $LATEST"
+echo "--- SEVERE lines (last 50) ---"
+SEVERE=$(grep -i "SEVERE" "$LATEST" 2>/dev/null | tail -50)
+echo "$SEVERE"
+SEVERE_COUNT=$(echo "$SEVERE" | grep -c "SEVERE" 2>/dev/null)
+echo "--- ERROR lines (last 20) ---"
+ERR=$(grep -i " ERROR " "$LATEST" 2>/dev/null | tail -20)
+echo "$ERR"
+ERR_COUNT=$(echo "$ERR" | grep -c "ERROR" 2>/dev/null)
+echo "-----------------------------"
+echo "SEVERE count : $SEVERE_COUNT"
+echo "ERROR count  : $ERR_COUNT"
+if [ "$SEVERE_COUNT" -gt 0 ] 2>/dev/null; then
+  echo "RESULT : FAIL ($SEVERE_COUNT SEVERE message(s) found - review log before sign-off)"
+elif [ "$ERR_COUNT" -gt 0 ] 2>/dev/null; then
+  echo "RESULT : WARN ($ERR_COUNT ERROR message(s) found - review but may be non-fatal)"
+else
+  echo "RESULT : PASS (no SEVERE or ERROR messages found in latest log)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 10 – Check Zowe ports are listening (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkPortsLive">
+        <title>Check Zowe Ports Listening</title>
+        <description>Uses netstat to confirm the core Zowe V3 ports (7554 gateway, 7556 discovery, 7552 catalog, 7553 ZAAS, 8544 ZSS) are in LISTEN state.</description>
+        <prereqStep name="checkLogErrors"/>
+        <instructions>
+            Runs netstat -an and checks for LISTEN on each Zowe port.
+
+            PASS : All 5 ports are in LISTEN state
+            WARN : Some ports listening (partial start)
+            FAIL : No Zowe ports found listening
+
+            Port reference:
+              7554  API Gateway
+              7556  Discovery Service
+              7552  API Catalog
+              7553  ZAAS (Zowe Auth and Access Service)
+              8544  ZSS (z/OS Services Server)
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate>
+#!/bin/sh
+echo "=== Zowe Port Listening Check ==="
+echo "Ports: 7554 7556 7552 7553 8544"
+echo "---------------------------------"
+LISTEN=0
+TOTAL=5
+for PORT in 7554 7556 7552 7553 8544; do
+  OUT=$(netstat -an 2>/dev/null | grep "\\.$PORT " | grep -i "listen")
+  if [ -n "$OUT" ]; then
+    echo "PORT $PORT : LISTENING"
+    echo "  $OUT"
+    LISTEN=$((LISTEN+1))
+  else
+    echo "PORT $PORT : NOT LISTENING"
+  fi
+done
+echo "---------------------------------"
+if [ $LISTEN -eq $TOTAL ]; then
+  echo "RESULT : PASS (all $TOTAL Zowe ports are listening)"
+elif [ $LISTEN -gt 0 ]; then
+  echo "RESULT : WARN ($LISTEN/$TOTAL ports listening - Zowe may be partially started)"
+else
+  echo "RESULT : FAIL (no Zowe ports found listening - check STC startup)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 11 – Derive validation status (setVariable)
+         ============================================================ -->
+
+    <step name="deriveStatus">
+        <title>Record Validation Verdict</title>
+        <description>Operator reviews all automated step outputs and records the overall validation verdict in VALIDATION_SUMMARY before the sign-off gate.</description>
+        <prereqStep name="checkPortsLive"/>
+        <variableValue name="VALIDATION_SUMMARY" required="true"/>
+        <variableValue name="APPROVER"           required="true"/>
+        <instructions>
+            Review the spool output from all preceding steps and set
+            VALIDATION_SUMMARY to one of:
+
+              PASS  — all checks passed, upgrade successful
+              WARN  — minor issues found, upgrade functionally complete
+              FAIL  — critical issues found, upgrade needs remediation
+
+            Also enter your TSO user ID in APPROVER.
+
+            Do not sign off with FAIL unless all issues are documented
+            in the change record.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+        <setVariable name="VALIDATION_SUMMARY" substitution="true">${instance-VALIDATION_SUMMARY}</setVariable>
+    </step>
+
+    <!-- ============================================================
+         Step 12 – Manual approval gate
+         ============================================================ -->
+
+    <step name="approvalGate">
+        <title>Post-Upgrade Validation Sign-Off</title>
+        <description>Manual step. Operator reviews all automated check results and signs off that the Zowe V3 upgrade is validated. The final report is not written until this step is marked complete.</description>
+        <prereqStep name="deriveStatus"/>
+        <instructions substitution="true">
+            Review the outputs from all preceding steps before marking
+            this step complete.
+
+            Checklist:
+              [ ] API Gateway responded HTTP 200
+              [ ] Discovery Service responded HTTP 200
+              [ ] API Catalog responded HTTP 200
+              [ ] JWT auth endpoint responded HTTP 200
+              [ ] zowe.yaml version matches ${instance-ZOWE_VERSION_EXPECTED}
+              [ ] Zowe zFS mounted at ${instance-ZOWE_ZFS_MOUNT}
+              [ ] All 3 Zowe STCs (ZWESLSTC, ZWESISTC, ZWESAUX) active
+              [ ] RACF keyring ${instance-KEYRING_NAME} intact
+              [ ] No SEVERE messages in Zowe logs
+              [ ] All 5 Zowe ports in LISTEN state
+
+            Validation verdict : ${instance-VALIDATION_SUMMARY}
+            Approver           : ${instance-APPROVER}
+
+            Mark this step complete to generate the final report.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+    </step>
+
+    <!-- ============================================================
+         Step 13 – Write validation report (shell-JCL)
+         ============================================================ -->
+
+    <step name="writeReport">
+        <title>Write Post-Upgrade Validation Report</title>
+        <description>Writes a timestamped post-upgrade validation report to REPORT_PATH on USS and surfaces the report on the JES spool for archiving.</description>
+        <prereqStep name="approvalGate"/>
+        <variableValue name="REPORT_PATH"          required="true"/>
+        <variableValue name="VALIDATION_SUMMARY"   required="true"/>
+        <variableValue name="APPROVER"             required="true"/>
+        <variableValue name="ZOWE_VERSION_EXPECTED" required="true"/>
+        <variableValue name="APIML_HOST"           required="true"/>
+        <variableValue name="APIML_PORT"           required="true"/>
+        <variableValue name="ZOWE_YAML_PATH"       required="true"/>
+        <variableValue name="ZOWE_ZFS_MOUNT"       required="true"/>
+        <variableValue name="KEYRING_OWNER"        required="true"/>
+        <variableValue name="KEYRING_NAME"         required="true"/>
+        <instructions substitution="true">
+            Writes the validation report to ${instance-REPORT_PATH} and
+            echoes it to the JES spool.
+
+            The report includes:
+              - Timestamp and approver
+              - Configuration reviewed (host, version, paths, keyring)
+              - Overall verdict: ${instance-VALIDATION_SUMMARY}
+
+            Retain this report as evidence for the change record.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+REPORT="${instance-REPORT_PATH}"
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+APPROVER="${instance-APPROVER}"
+echo "Writing report to $REPORT"
+echo "============================================================"  > "$REPORT"
+echo "  Zowe V3 Post-Upgrade Validation Report"                     >> "$REPORT"
+echo "  Generated : $TS"                                            >> "$REPORT"
+echo "  Approver  : $APPROVER"                                      >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "CONFIGURATION VALIDATED"                                      >> "$REPORT"
+echo "  APIML host    : ${instance-APIML_HOST}:${instance-APIML_PORT}" >> "$REPORT"
+echo "  Zowe version  : ${instance-ZOWE_VERSION_EXPECTED}"         >> "$REPORT"
+echo "  zowe.yaml     : ${instance-ZOWE_YAML_PATH}"                >> "$REPORT"
+echo "  zFS mount     : ${instance-ZOWE_ZFS_MOUNT}"                >> "$REPORT"
+echo "  Keyring owner : ${instance-KEYRING_OWNER}"                 >> "$REPORT"
+echo "  Keyring name  : ${instance-KEYRING_NAME}"                  >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "AUTOMATED CHECKS"                                             >> "$REPORT"
+echo "  1. API Gateway         (HTTP 200) - see probeGateway step" >> "$REPORT"
+echo "  2. Discovery Service   (HTTP 200) - see probeDiscovery"    >> "$REPORT"
+echo "  3. API Catalog         (HTTP 200) - see probeCatalog"      >> "$REPORT"
+echo "  4. JWT Auth endpoint   (HTTP 200) - see probeZoweAuth"     >> "$REPORT"
+echo "  5. zowe.yaml version   check      - see checkVersion"      >> "$REPORT"
+echo "  6. zFS mount           check      - see checkZfsMounted"   >> "$REPORT"
+echo "  7. Zowe STCs           running    - see checkSTCsRunning"  >> "$REPORT"
+echo "  8. RACF keyring        intact     - see checkKeyring"      >> "$REPORT"
+echo "  9. Log error           scan       - see checkLogErrors"    >> "$REPORT"
+echo " 10. Port availability   check      - see checkPortsLive"    >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "VALIDATION VERDICT"                                           >> "$REPORT"
+echo "  ${instance-VALIDATION_SUMMARY}"                            >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "SIGN-OFF"                                                     >> "$REPORT"
+echo "  Approved by : $APPROVER"                                   >> "$REPORT"
+echo "  Approved at : $TS"                                         >> "$REPORT"
+echo "  Workflow    : zowe-post-upgrade-validation v1.0"           >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo "  Retain this report for change management records."         >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""
+echo "=== Report written to $REPORT ==="
+cat "$REPORT"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
