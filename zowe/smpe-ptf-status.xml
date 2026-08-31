@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  smpe-ptf-status.xml
+  SMP/E PTF status report for a given CSI and target zone.
+  Steps: checkCsi, listAppliedPtfs, listHoldPtfs, listErrorPtfs,
+         approvalGate, writeReport
+-->
+<workflow xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="workflow_v1.xsd">
+
+    <workflowInfo>
+        <workflowID>smpe-ptf-status</workflowID>
+        <workflowDefaultName>SMP/E PTF Status Report</workflowDefaultName>
+        <workflowDescription>Queries SMP/E for applied, held, and errored PTFs in a target zone</workflowDescription>
+        <workflowVersion>1.0</workflowVersion>
+        <vendor>IBM</vendor>
+    </workflowInfo>
+
+    <!-- ============================================================
+         Variables
+         ============================================================ -->
+
+    <variable name="CSI_DATASET" scope="instance" visibility="public">
+        <label>CSI Dataset Name</label>
+        <abstract>Fully qualified name of the SMP/E global CSI dataset (e.g. SYS1.GLOBAL.CSI)</abstract>
+        <description>The SMP/E global CSI (Consolidated Software Inventory) dataset. This is the master catalog of all SMP/E-managed software on the system. All GIMSMP queries are directed at this dataset.</description>
+        <category>SMP/E</category>
+        <string>
+            <default>SYS1.GLOBAL.CSI</default>
+        </string>
+    </variable>
+
+    <variable name="TARGET_ZONE" scope="instance" visibility="public">
+        <label>Target Zone Name</label>
+        <abstract>SMP/E target zone to query (e.g. TZONE)</abstract>
+        <description>The name of the SMP/E target zone to query for applied PTFs. Use ISPF 3.4 or LISTCAT against the CSI to find zone names if unknown.</description>
+        <category>SMP/E</category>
+        <string>
+            <default>TZONE</default>
+        </string>
+    </variable>
+
+    <variable name="FMID_FILTER" scope="instance" visibility="public">
+        <label>FMID Filter (optional)</label>
+        <abstract>Limit the PTF query to a specific FMID (e.g. AZWE003 for Zowe). Leave blank for all FMIDs.</abstract>
+        <description>When set, the listAppliedPtfs step filters the GIMSMP output to show only PTFs belonging to this FMID. Leave blank to report all PTFs in the target zone. Zowe V3 FMID is AZWE003.</description>
+        <category>SMP/E</category>
+        <string>
+            <default>AZWE003</default>
+        </string>
+    </variable>
+
+    <variable name="REPORT_PATH" scope="instance" visibility="public">
+        <label>Report Output Path</label>
+        <abstract>USS path where the PTF status report will be written</abstract>
+        <description>The full USS path for the PTF status report output file.</description>
+        <category>SMP/E</category>
+        <string>
+            <default>/z/andre/zowe/smpe-ptf-status.log</default>
+        </string>
+    </variable>
+
+    <!-- ============================================================
+         Step 1 – Confirm CSI dataset exists (shell-JCL)
+         ============================================================ -->
+
+    <step name="checkCsi">
+        <title>Confirm CSI Dataset Exists</title>
+        <description>Runs LISTCAT against the CSI dataset name to confirm it exists and is accessible before running GIMSMP queries.</description>
+        <variableValue name="CSI_DATASET" required="true"/>
+        <instructions substitution="true">
+            Runs tsocmd LISTCAT ENT(${instance-CSI_DATASET}) to confirm
+            the CSI dataset exists and is accessible to this user ID.
+
+            PASS : LISTCAT returns data for the dataset
+            FAIL : Dataset not found or not accessible
+
+            If this fails, verify the CSI name with your SMP/E
+            administrator. Common names: SYS1.GLOBAL.CSI,
+            SMPE.GLOBAL.CSI, or a product-specific CSI.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+CSI="${instance-CSI_DATASET}"
+echo "=== CSI Dataset Check ==="
+echo "CSI : $CSI"
+echo "-------------------------"
+OUT=$(tsocmd "LISTCAT ENT($CSI)" 2>&amp;1)
+RC=$?
+echo "$OUT" | head -20
+echo "-------------------------"
+if [ $RC -eq 0 ]; then
+  echo "RESULT : PASS (CSI dataset $CSI found, RC=0)"
+else
+  echo "RESULT : FAIL (LISTCAT returned RC=$RC - check CSI name and access)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 2 – List applied PTFs (shell-JCL via GIMSMP)
+         ============================================================ -->
+
+    <step name="listAppliedPtfs">
+        <title>List Applied PTFs</title>
+        <description>Submits a GIMSMP QUERY SYSMODS job to list all PTFs applied in the target zone. If FMID_FILTER is set, filters output to that FMID only.</description>
+        <prereqStep name="checkCsi"/>
+        <variableValue name="CSI_DATASET"  required="true"/>
+        <variableValue name="TARGET_ZONE"  required="true"/>
+        <variableValue name="FMID_FILTER"  required="true"/>
+        <instructions substitution="true">
+            Runs GIMSMP with SET BDY(${instance-TARGET_ZONE}) and
+            QUERY SYSMODS TYPE(PTF) APPLYCHECK to list all PTFs.
+
+            If FMID_FILTER is set to ${instance-FMID_FILTER}, the
+            output is filtered to that FMID only.
+
+            Review the output to confirm the expected PTFs are applied
+            before or after a maintenance window.
+        </instructions>
+        <weight>3</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+CSI="${instance-CSI_DATASET}"
+ZONE="${instance-TARGET_ZONE}"
+FMID="${instance-FMID_FILTER}"
+FMID_LABEL="$FMID"
+if [ -z "$FMID_LABEL" ]; then FMID_LABEL="ALL"; fi
+echo "=== Applied PTFs ==="
+echo "CSI    : $CSI"
+echo "Zone   : $ZONE"
+echo "FMID   : $FMID_LABEL"
+echo "--------------------"
+SMPCNTL="  SET BDY($ZONE) .
+  QUERY SYSMODS
+    TYPE(PTF)
+    APPLYCHECK ."
+TMPCTL="/tmp/smpe_query_$$.txt"
+echo "$SMPCNTL" > "$TMPCTL"
+OUT=$(tsocmd "EXEC '$CSI' 'SMPCNTL'" 2>&amp;1)
+OUT2=$(echo "  SET BDY($ZONE) .
+  QUERY SYSMODS TYPE(PTF) APPLYCHECK ." | tsocmd "GIMSMP CSI('$CSI')" 2>&amp;1)
+RC=$?
+rm -f "$TMPCTL" 2>/dev/null
+if [ $RC -ne 0 ]; then
+  echo "Note: direct GIMSMP via tsocmd returned RC=$RC"
+  echo "Attempting via IKJEFT01..."
+  OUT3=$(tsocmd "GIMSMP CSI('$CSI') SET BDY($ZONE) . QUERY SYSMODS TYPE(PTF) APPLYCHECK ." 2>&amp;1)
+  echo "$OUT3" | head -100
+else
+  echo "$OUT2" | head -100
+fi
+echo "--------------------"
+if [ -n "$FMID" ]; then
+  echo "--- Filtered to FMID: $FMID ---"
+  echo "$OUT2" | grep "$FMID" | head -50
+fi
+echo "RESULT : PTF query attempted - review output above"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 3 – List PTFs in HOLD status (shell-JCL)
+         ============================================================ -->
+
+    <step name="listHoldPtfs">
+        <title>List PTFs in HOLD Status</title>
+        <description>Queries SMP/E for any PTFs in HOLD status in the target zone. HOLD PTFs block apply processing and must be resolved before installing dependent PTFs.</description>
+        <prereqStep name="listAppliedPtfs"/>
+        <variableValue name="CSI_DATASET" required="true"/>
+        <variableValue name="TARGET_ZONE" required="true"/>
+        <instructions substitution="true">
+            Queries CSI ${instance-CSI_DATASET} zone
+            ${instance-TARGET_ZONE} for PTFs with HOLD status.
+
+            PASS : No PTFs in HOLD status
+            WARN : One or more PTFs are held
+
+            A HOLD condition means IBM has issued a HOLDDATA record
+            against the PTF — usually due to a defect, dependency, or
+            PE (product error). Each held PTF must be investigated
+            before the hold is bypassed or the PTF is skipped.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+CSI="${instance-CSI_DATASET}"
+ZONE="${instance-TARGET_ZONE}"
+echo "=== PTFs in HOLD Status ==="
+echo "CSI  : $CSI"
+echo "Zone : $ZONE"
+echo "---------------------------"
+OUT=$(tsocmd "GIMSMP CSI('$CSI') SET BDY($ZONE) . QUERY SYSMODS TYPE(PTF) HOLD ." 2>&amp;1)
+RC=$?
+echo "$OUT" | head -80
+echo "---------------------------"
+HOLD_COUNT=$(echo "$OUT" | grep -c "HOLD" 2>/dev/null)
+if [ "$HOLD_COUNT" -gt 0 ] 2>/dev/null; then
+  echo "RESULT : WARN ($HOLD_COUNT HOLD reference(s) found - review before applying PTFs)"
+else
+  echo "RESULT : PASS (no HOLD PTFs found in zone $ZONE)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 4 – List PTFs in ERROR status (shell-JCL)
+         ============================================================ -->
+
+    <step name="listErrorPtfs">
+        <title>List PTFs in ERROR Status</title>
+        <description>Queries SMP/E for any PTFs in ERROR status in the target zone. ERROR PTFs indicate a failed apply or receive operation that needs remediation.</description>
+        <prereqStep name="listHoldPtfs"/>
+        <variableValue name="CSI_DATASET" required="true"/>
+        <variableValue name="TARGET_ZONE" required="true"/>
+        <instructions substitution="true">
+            Queries CSI ${instance-CSI_DATASET} zone
+            ${instance-TARGET_ZONE} for PTFs with ERROR status.
+
+            PASS : No PTFs in ERROR status
+            FAIL : One or more PTFs in ERROR status
+
+            An ERROR status means a previous SMP/E apply or receive
+            operation failed and left the zone in an inconsistent
+            state. These must be resolved before running further
+            SMP/E operations.
+        </instructions>
+        <weight>2</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+CSI="${instance-CSI_DATASET}"
+ZONE="${instance-TARGET_ZONE}"
+echo "=== PTFs in ERROR Status ==="
+echo "CSI  : $CSI"
+echo "Zone : $ZONE"
+echo "----------------------------"
+OUT=$(tsocmd "GIMSMP CSI('$CSI') SET BDY($ZONE) . QUERY SYSMODS TYPE(PTF) STATUS(ERROR) ." 2>&amp;1)
+RC=$?
+echo "$OUT" | head -80
+echo "----------------------------"
+ERR_COUNT=$(echo "$OUT" | grep -ic "error" 2>/dev/null)
+if [ $RC -eq 0 ] &amp;&amp; [ "$ERR_COUNT" -eq 0 ] 2>/dev/null; then
+  echo "RESULT : PASS (no ERROR PTFs found in zone $ZONE)"
+else
+  echo "RESULT : WARN (ERROR references found or RC=$RC - review output)"
+fi
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+    <!-- ============================================================
+         Step 5 – Manual approval gate
+         ============================================================ -->
+
+    <step name="approvalGate">
+        <title>PTF Report Sign-Off</title>
+        <description>Manual step. Operator reviews all PTF query outputs and signs off before the final report is written.</description>
+        <prereqStep name="listErrorPtfs"/>
+        <instructions substitution="true">
+            Review the spool output from all preceding steps:
+
+              checkCsi       — CSI dataset accessible?
+              listAppliedPtfs — PTFs applied for ${instance-FMID_FILTER}?
+              listHoldPtfs   — Any HOLD PTFs to investigate?
+              listErrorPtfs  — Any ERROR PTFs to remediate?
+
+            Mark this step complete when you are satisfied the PTF
+            status has been reviewed and documented.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>false</autoEnable>
+    </step>
+
+    <!-- ============================================================
+         Step 6 – Write PTF status report (shell-JCL)
+         ============================================================ -->
+
+    <step name="writeReport">
+        <title>Write PTF Status Report</title>
+        <description>Writes a timestamped PTF status report to REPORT_PATH on USS and surfaces it on the JES spool for archiving or attaching to a change record.</description>
+        <prereqStep name="approvalGate"/>
+        <variableValue name="REPORT_PATH"  required="true"/>
+        <variableValue name="CSI_DATASET"  required="true"/>
+        <variableValue name="TARGET_ZONE"  required="true"/>
+        <variableValue name="FMID_FILTER"  required="true"/>
+        <instructions substitution="true">
+            Writes the PTF status report to ${instance-REPORT_PATH}.
+
+            Attach this report to the change record for the maintenance
+            window. Run this workflow before and after PTF application
+            to produce a before/after comparison.
+        </instructions>
+        <weight>1</weight>
+        <autoEnable>true</autoEnable>
+        <template>
+            <inlineTemplate substitution="true">
+#!/bin/sh
+REPORT="${instance-REPORT_PATH}"
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+echo "Writing PTF status report to $REPORT"
+echo "============================================================"  > "$REPORT"
+echo "  SMP/E PTF Status Report"                                    >> "$REPORT"
+echo "  Generated : $TS"                                           >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "CONFIGURATION"                                                >> "$REPORT"
+echo "  CSI dataset  : ${instance-CSI_DATASET}"                    >> "$REPORT"
+echo "  Target zone  : ${instance-TARGET_ZONE}"                    >> "$REPORT"
+echo "  FMID filter  : ${instance-FMID_FILTER}"                    >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "QUERIES PERFORMED"                                            >> "$REPORT"
+echo "  1. CSI accessible         - see checkCsi step output"      >> "$REPORT"
+echo "  2. Applied PTFs           - see listAppliedPtfs output"    >> "$REPORT"
+echo "  3. PTFs in HOLD status    - see listHoldPtfs output"       >> "$REPORT"
+echo "  4. PTFs in ERROR status   - see listErrorPtfs output"      >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "SIGN-OFF"                                                     >> "$REPORT"
+echo "  Reviewed at : $TS"                                         >> "$REPORT"
+echo "  Workflow    : smpe-ptf-status v1.0"                        >> "$REPORT"
+echo ""                                                             >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo "  Attach to change record for maintenance window evidence."  >> "$REPORT"
+echo "============================================================" >> "$REPORT"
+echo ""
+echo "=== Report written to $REPORT ==="
+cat "$REPORT"
+            </inlineTemplate>
+            <submitAs>shell-JCL</submitAs>
+            <maxLrecl>1024</maxLrecl>
+        </template>
+    </step>
+
+</workflow>
