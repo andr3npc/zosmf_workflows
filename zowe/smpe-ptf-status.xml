@@ -26,7 +26,7 @@
         <description>The SMP/E global CSI (Consolidated Software Inventory) dataset. This is the master catalog of all SMP/E-managed software on the system. All GIMSMP queries are directed at this dataset.</description>
         <category>SMP/E</category>
         <string>
-            <default>SYS1.GLOBAL.CSI</default>
+            <default>SMPE.ITSCPLEX.JAVA.GLOBAL.CSI</default>
         </string>
     </variable>
 
@@ -36,7 +36,7 @@
         <description>The name of the SMP/E target zone to query for applied PTFs. Use ISPF 3.4 or LISTCAT against the CSI to find zone names if unknown.</description>
         <category>SMP/E</category>
         <string>
-            <default>TZONE</default>
+            <default>JAVATZ</default>
         </string>
     </variable>
 
